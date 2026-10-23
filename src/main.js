@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { RGBELoader } from 'three/addons/RGBELoader.js';
 import { SoftBodyWorld } from './physics.js';
 import { World } from './world.js';
+import { MAPS } from './maps.js';
 import { Vehicle, VEHICLE_TYPES } from './vehicle.js';
 import { Crate } from './props.js';
 import { Input } from './input.js';
@@ -55,6 +56,7 @@ class Game {
     const tl = new THREE.TextureLoader();
     const aniso = Math.min(8, this.renderer.capabilities.getMaxAnisotropy());
     const files = {
+      sand: 'sand_diff.jpg', redrock: 'redrock_diff.jpg', rock: 'rock_diff.jpg', snow: 'snow_diff.jpg', brick: 'brick_diff.jpg',
       grass: 'grass_diff.jpg', dirt: 'dirt_diff.jpg', asphalt: 'asphalt_diff.jpg',
       concrete: 'concrete_diff.jpg', concreteN: 'concrete_nor.jpg', metal: 'metal_diff.jpg', wood: 'wood_diff.jpg', bark: 'bark_diff.jpg',
     };
@@ -98,39 +100,95 @@ class Game {
     sun.shadow.mapSize.set(QUALITY.shadow, QUALITY.shadow);
     sun.shadow.bias = -0.0004; sun.shadow.normalBias = 0.03;
     s.add(sun); s.add(sun.target);
-    this.worldMap = new World(s, this.textures, QUALITY);
-    this.spawnAll();
+    let saved = null;
+    try { saved = localStorage.getItem('sbd-map'); } catch (e) { /* storage blocked */ }
+    this.loadMap(MAPS[saved] ? saved : 'grounds');
     this.buildBeamView();
     this.camPos = new THREE.Vector3(0, 5, -10);
     this.camLook = new THREE.Vector3();
     this.setupUI();
   }
 
-  // (re)build every soft body
+  loadMap(id) {
+    if (this.vehicles) for (const v of this.vehicles) v.dispose();
+    if (this.crates) for (const c of this.crates) c.dispose();
+    this.vehicles = this.crates = null;
+    if (this.worldMap) this.worldMap.dispose();
+    const def = MAPS[id];
+    this.mapId = id;
+    try { localStorage.setItem('sbd-map', id); } catch (e) { /* storage blocked */ }
+    this.worldMap = new World(this.scene, this.textures, QUALITY, def);
+    const f = def.fog || { color: 0xa9c3dc, near: 350, far: 1800 };
+    this.scene.fog = new THREE.Fog(f.color, f.near, f.far);
+    const sun = def.sun || { color: 0xfff1dc, intensity: 2.6 };
+    this.sun.color.setHex(sun.color); this.sun.intensity = sun.intensity;
+    this.spawnAll();
+    this.chaseYaw = undefined;
+    const sel = document.getElementById('mapSel'); if (sel) sel.value = id;
+  }
+
+  mapSpawn() {
+    const w = this.worldMap, d = w.def;
+    const sp = d.spawnFn ? d.spawnFn(w) : d.spawn;
+    return { pos: new THREE.Vector3(sp.x, w.heightAt(sp.x, sp.z) + 0.05, sp.z), yaw: sp.yaw };
+  }
+
+  // (re)build every soft body for the current map
   spawnAll() {
     if (this.vehicles) for (const v of this.vehicles) v.dispose();
     if (this.crates) for (const c of this.crates) c.dispose();
+    const w = this.worldMap, d = w.def;
     this.phys = new SoftBodyWorld();
-    this.phys.collider = this.worldMap;
+    this.phys.collider = w;
     this.grab = null;
     this.phys.onSubstep.push((dt) => this.grabStep(dt));
     this.vehicles = [];
     this.crates = [];
-    this.player = new Vehicle(this, this.vehicleType, new THREE.Vector3(0, 0.05, -10), 0, { controlled: true, color: this.color });
+    const sp = this.mapSpawn();
+    this.player = new Vehicle(this, this.vehicleType, sp.pos, sp.yaw, { controlled: true, color: this.color });
     this.player.body.noSleep = true;
     this.vehicles.push(this.player);
-    // parked cars to crash into
-    this.vehicles.push(new Vehicle(this, 'hatch', new THREE.Vector3(-14, 0.05, 30), Math.PI / 2, { color: 0xe0b020 }));
-    this.vehicles.push(new Vehicle(this, 'pickup', new THREE.Vector3(18, 0.05, 30), -Math.PI / 2 + 0.2, { color: 0x3c6e47 }));
-    for (const [x, y, z] of this.worldMap.crateSpots()) this.crates.push(new Crate(this, x, y, z));
+    const at = (o) => new THREE.Vector3(o.x, w.heightAt(o.x, o.z) + 0.05, o.z);
+    for (const o of (d.parkedFn ? d.parkedFn(w) : d.parked) || []) this.vehicles.push(new Vehicle(this, o.type, at(o), o.yaw, { color: o.color }));
+    for (const o of d.ai || []) {
+      const v = new Vehicle(this, o.type, at(o), o.yaw, { color: o.color });
+      v.ai = { stuck: 0, reverse: 0 };
+      v.body.noSleep = true;
+      this.vehicles.push(v);
+    }
+    for (const [x, y, z] of (d.cratesFn ? d.cratesFn(w) : d.crates) || []) this.crates.push(new Crate(this, x, w.heightAt(x, z) + y, z));
     this.lastDamage = 0;
-    if (this.beamLines) this.rebuildBeamView();
+  }
+
+  // demolition-derby drivers: aim at the player, back up when stuck
+  driveAI(dt) {
+    const p = this.player.center();
+    for (const v of this.vehicles) {
+      if (!v.ai || !v.frame) continue;
+      const a = v.ai, c = v.center(), f = v.frame.f, r = v.frame.r;
+      const dx = p.x - c.x, dz = p.z - c.z;
+      const ang = Math.atan2(dx * r[0] + dz * r[2], dx * f[0] + dz * f[2]);
+      const upright = v.frame.u[1] > 0.4;
+      if (a.reverse > 0) {
+        a.reverse -= dt;
+        Object.assign(v.input, { throttle: 0, brake: 1, steer: -Math.sign(ang), handbrake: 0 });
+        continue;
+      }
+      a.stuck = Math.abs(v.speed) < 1.2 ? a.stuck + dt : 0;
+      if (a.stuck > 1.8) { a.stuck = 0; a.reverse = 1.4; }
+      const near = Math.hypot(dx, dz) < 12;
+      Object.assign(v.input, {
+        throttle: upright && v.engineHealth > 0.12 ? (near ? 1 : 0.75) : 0,
+        brake: 0, handbrake: 0,
+        steer: Math.max(-1, Math.min(1, ang * 2.2)),
+      });
+    }
   }
 
   resetPlayer(toSpawn) {
     const v = this.player;
     let pos, yaw;
-    if (toSpawn) { pos = new THREE.Vector3(0, 0.05, -10); yaw = 0; }
+    if (toSpawn) { const sp = this.mapSpawn(); pos = sp.pos; yaw = sp.yaw; }
     else {
       const c = v.center(); const f = v.frame.f;
       yaw = Math.atan2(f[0], f[2]);
@@ -193,6 +251,16 @@ class Game {
   }
 
   setupUI() {
+    const ms = $('mapSel');
+    for (const [k, m] of Object.entries(MAPS)) { const o = document.createElement('option'); o.value = k; o.textContent = m.label; ms.appendChild(o); }
+    ms.value = this.mapId;
+    $('mapDesc').textContent = MAPS[this.mapId].desc;
+    ms.onchange = () => {
+      const id = ms.value; ms.blur();
+      $('mapDesc').textContent = MAPS[id].desc;
+      $('loading').style.display = 'flex'; $('loadtxt').textContent = 'Building ' + MAPS[id].label + '…';
+      setTimeout(() => { this.loadMap(id); $('loading').style.display = 'none'; }, 40);
+    };
     const sel = $('vehSel');
     for (const [k, t] of Object.entries(VEHICLE_TYPES)) {
       const o = document.createElement('option'); o.value = k; o.textContent = t.label; sel.appendChild(o);
@@ -391,7 +459,8 @@ class Game {
     v.input.brake = this.input.brake;
     v.input.steer = this.input.steer;
     v.input.handbrake = this.input.handbrake;
-    for (const o of this.vehicles) if (o !== v) { o.input.brake = 0; o.input.handbrake = 1; }
+    for (const o of this.vehicles) if (o !== v && !o.ai) { o.input.brake = 0; o.input.handbrake = 1; }
+    if (!this.paused) this.driveAI(dt * this.timeScale);
 
     let physMs = 0, steps = 0;
     if (!this.paused) {

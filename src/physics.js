@@ -33,6 +33,9 @@ export class SoftBodyWorld {
     this.radius = new Float32Array(maxNodes);  // world contact radius
     this.cradius = new Float32Array(maxNodes); // body-vs-body radius
     this.body = new Int32Array(maxNodes);
+    this.ix = new Float32Array(maxNodes); // spawn positions (rest shape)
+    this.iy = new Float32Array(maxNodes);
+    this.iz = new Float32Array(maxNodes);
     this.collides = new Uint8Array(maxNodes); // collides with world
     this.selfColl = new Uint8Array(maxNodes); // collides with other bodies
 
@@ -79,6 +82,7 @@ export class SoftBodyWorld {
     const i = this.nodeCount++;
     if (i >= this.maxNodes) throw new Error('node pool full');
     this.px[i] = x; this.py[i] = y; this.pz[i] = z;
+    this.ix[i] = x; this.iy[i] = y; this.iz[i] = z;
     this.vx[i] = this.vy[i] = this.vz[i] = 0;
     this.mass[i] = m; this.invMass[i] = 1 / m;
     this.friction[i] = opts.friction ?? 0.8;
@@ -197,6 +201,14 @@ export class SoftBodyWorld {
 
     for (let c = 0; c < this.onSubstep.length; c++) this.onSubstep[c](dt);
 
+    // ---- self collision inside each soft body ----
+    for (let bi = 0; bi < B.length; bi++) {
+      const b = B[bi];
+      if (b.sleeping || !b.selfCollide) continue;
+      if (--b.selfTimer <= 0) { this._buildSelfPairs(b); b.selfTimer = 12; }
+      this._collideSelf(b, dt);
+    }
+
     // ---- body vs body (node spheres) ----
     const pairs = this._pairs;
     if (pairs) for (let p = 0; p < pairs.length; p += 2) this._collideBodies(pairs[p], pairs[p + 1], dt);
@@ -309,6 +321,68 @@ export class SoftBodyWorld {
         }
         fx[i] += fxi; fy[i] += fyi; fz[i] += fzi;
       }
+    }
+  }
+
+  // Candidate node pairs inside one body that may touch: close now, but not
+  // neighbours in the rest shape. Rebuilt every few substeps with a hash grid.
+  _buildSelfPairs(b) {
+    const { px, py, pz, ix, iy, iz, cradius, selfColl } = this;
+    const TB = 4096, CS = 0.55, SEARCH = 0.55, REST_MIN = 0.12;
+    const head = b._head || (b._head = new Int32Array(TB));
+    const n0 = b.nodeStart, n1 = b.nodeEnd;
+    const next = b._next || (b._next = new Int32Array(n1 - n0));
+    const pairs = b.selfPairs || (b.selfPairs = new Int32Array(16384));
+    const pd = b.selfD || (b.selfD = new Float32Array(8192));
+    head.fill(-1);
+    const key = (cx, cy, cz) => ((cx * 73856093) ^ (cy * 19349663) ^ (cz * 83492791)) & (TB - 1);
+    for (let i = n0; i < n1; i++) {
+      if (!selfColl[i] || cradius[i] > 0.3) continue;
+      const k = key(Math.floor(px[i] / CS), Math.floor(py[i] / CS), Math.floor(pz[i] / CS));
+      next[i - n0] = head[k]; head[k] = i;
+    }
+    let np = 0;
+    const S2 = SEARCH * SEARCH, R2 = REST_MIN * REST_MIN;
+    for (let i = n0; i < n1 && np < pairs.length - 2; i++) {
+      if (!selfColl[i] || cradius[i] > 0.3) continue;
+      const cx = Math.floor(px[i] / CS), cy = Math.floor(py[i] / CS), cz = Math.floor(pz[i] / CS);
+      for (let ox = -1; ox <= 1; ox++) for (let oy = -1; oy <= 1; oy++) for (let oz = -1; oz <= 1; oz++) {
+        for (let j = head[key(cx + ox, cy + oy, cz + oz)]; j >= 0; j = next[j - n0]) {
+          if (j <= i) continue;
+          const dx = px[j] - px[i], dy = py[j] - py[i], dz = pz[j] - pz[i];
+          if (dx * dx + dy * dy + dz * dz > S2) continue;
+          const rx = ix[j] - ix[i], ry = iy[j] - iy[i], rz = iz[j] - iz[i];
+          const r2 = rx * rx + ry * ry + rz * rz;
+          if (r2 < R2) continue;
+          // hash collisions can repeat a cell: skip duplicates cheaply
+          if (np >= 2 && pairs[np - 2] === i && pairs[np - 1] === j) continue;
+          // contact distance: never more than ~75% of how far apart they start
+          pd[np >> 1] = Math.min(0.24, Math.sqrt(r2) * 0.75);
+          pairs[np++] = i; pairs[np++] = j;
+          if (np >= pairs.length - 2) break;
+        }
+      }
+    }
+    b.selfCount = np;
+  }
+
+  _collideSelf(b, dt) {
+    const { px, py, pz, vx, vy, vz, fx, fy, fz, mass } = this;
+    const pairs = b.selfPairs, pd = b.selfD, np = b.selfCount || 0;
+    const K = 3.0e4, C = 300;
+    for (let p = 0; p < np; p += 2) {
+      const i = pairs[p], j = pairs[p + 1], D = pd[p >> 1];
+      const dx = px[j] - px[i], dy = py[j] - py[i], dz = pz[j] - pz[i];
+      const d2 = dx * dx + dy * dy + dz * dz;
+      if (d2 >= D * D || d2 < 1e-12) continue;
+      const dist = Math.sqrt(d2), nx = dx / dist, ny = dy / dist, nz = dz / dist;
+      const mr = (mass[i] * mass[j]) / (mass[i] + mass[j]);
+      const vn = (vx[j] - vx[i]) * nx + (vy[j] - vy[i]) * ny + (vz[j] - vz[i]) * nz;
+      const F = mr * (K * (D - dist) - C * vn);
+      if (F <= 0) continue;
+      const gx = F * nx, gy = F * ny, gz = F * nz;
+      fx[j] += gx; fy[j] += gy; fz[j] += gz;
+      fx[i] -= gx; fy[i] -= gy; fz[i] -= gz;
     }
   }
 

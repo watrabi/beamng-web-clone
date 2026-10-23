@@ -3,7 +3,7 @@ import * as THREE from 'three';
 // ---------------------------------------------------------------------------
 // Seeded gradient noise
 // ---------------------------------------------------------------------------
-function makeNoise(seed = 1337) {
+export function makeNoise(seed = 1337) {
   const perm = new Uint8Array(512);
   const p = new Uint8Array(256);
   for (let i = 0; i < 256; i++) p[i] = i;
@@ -25,12 +25,12 @@ function makeNoise(seed = 1337) {
   return { noise, rnd };
 }
 
-function smoothstep(a, b, x) { const t = Math.min(1, Math.max(0, (x - a) / (b - a))); return t * t * (3 - 2 * t); }
+export function smoothstep(a, b, x) { const t = Math.min(1, Math.max(0, (x - a) / (b - a))); return t * t * (3 - 2 * t); }
 
 // ---------------------------------------------------------------------------
 // Static colliders: oriented boxes and capsules, bucketed in a uniform grid.
 // ---------------------------------------------------------------------------
-class Box {
+export class Box {
   constructor(cx, cy, cz, hx, hy, hz, yaw = 0, pitch = 0, roll = 0, friction = 0.9) {
     this.c = new THREE.Vector3(cx, cy, cz);
     this.h = [hx, hy, hz];
@@ -75,13 +75,13 @@ class Box {
   }
 }
 
-class Capsule {
+export class Capsule {
   constructor(ax, ay, az, bx, by, bz, r, friction = 0.8) {
     this.a = [ax, ay, az]; this.b = [bx, by, bz]; this.r = r; this.friction = friction;
     this.min = [Math.min(ax, bx) - r, Math.min(ay, by) - r, Math.min(az, bz) - r];
     this.max = [Math.max(ax, bx) + r, Math.max(ay, by) + r, Math.max(az, bz) + r];
     const dx = bx - ax, dy = by - ay, dz = bz - az;
-    this.d = [dx, dy, dz]; this.len2 = dx * dx + dy * dy + dz * dz;
+    this.d = [dx, dy, dz]; this.len2 = Math.max(1e-9, dx * dx + dy * dy + dz * dz);
   }
   contact(x, y, z, rad, out) {
     const a = this.a, d = this.d;
@@ -97,100 +97,161 @@ class Capsule {
 }
 
 // ---------------------------------------------------------------------------
-// World
+// ---------------------------------------------------------------------------
+// World: terrain + roads + static props, all driven by a map definition
+// (see maps.js).
 // ---------------------------------------------------------------------------
 export class World {
-  constructor(scene, textures, quality) {
+  constructor(scene, textures, quality, def) {
     this.scene = scene;
+    this.def = def;
     this.tex = textures;
     this.quality = quality;
-    this.size = 960;
-    this.res = quality.terrainRes; // vertices per side
+    this.group = new THREE.Group();
+    scene.add(this.group);
+    this.size = def.size;
+    this.res = Math.round(quality.terrainRes * (def.resScale || 1)) | 1;
     this.cell = this.size / (this.res - 1);
     this.half = this.size / 2;
     this.colliders = [];
     this.gridCell = 16;
     this.grid = new Map();
     this.stamp = 0;
+    this.batches = new Map();
+    this.mats = {};
     this._tmp = { depth: 0, nx: 0, ny: 1, nz: 0, friction: 1 };
-    const { noise, rnd } = makeNoise(20261023);
+    const { noise, rnd } = makeNoise(def.seed || 1337);
     this.noise = noise; this.rnd = rnd;
+    this.smoothstep = smoothstep;
+    this.fr = Object.assign({ ground: 0.78, dirt: 0.68, road: 1.0 }, def.friction);
 
     this.buildRoads();
+    if (def.prepare) def.prepare(this);
     this.buildHeights();
     this.buildTerrainMesh();
-    this.buildProvingGround();
+    if (def.build) def.build(this);
     this.buildTrees();
+    this.flushBatches();
     for (const c of this.colliders) this._insert(c);
   }
 
-  // natural terrain before roads
-  naturalHeight(x, z) {
-    const n = this.noise;
-    let h = n(x * 0.004, z * 0.004) * 38 + n(x * 0.011 + 7, z * 0.011) * 12 + n(x * 0.04, z * 0.04 + 3) * 2.5 + n(x * 0.12, z * 0.12) * 0.35;
-    // flat proving ground around the origin
-    const pad = Math.max(Math.abs(x), Math.abs(z));
-    h *= smoothstep(95, 170, pad);
-    // mountains at the map rim keep you in
-    const rim = Math.max(Math.abs(x), Math.abs(z));
-    h += Math.pow(smoothstep(this.half - 130, this.half, rim), 1.6) * 55 * (0.75 + 0.5 * this.noise(x * 0.02, z * 0.02 + 9));
-    return h;
+  add(o) { this.group.add(o); return o; }
+
+  dispose() {
+    this.scene.remove(this.group);
+    this.group.traverse(o => {
+      if (o.geometry) o.geometry.dispose();
+      if (o.material) (Array.isArray(o.material) ? o.material : [o.material]).forEach(m => m.dispose());
+    });
   }
 
+  naturalHeight(x, z) { return this.def.height(x, z, this); }
+
+  // shared materials for props
+  mat(name) {
+    if (this.mats[name]) return this.mats[name];
+    const t = this.tex, S = (o) => new THREE.MeshStandardMaterial(o);
+    const m = {
+      concrete: () => S({ map: t.concrete, normalMap: t.concreteN, roughness: 0.9 }),
+      wood: () => S({ map: t.wood, color: 0xd8c6a0, roughness: 0.8 }),
+      metalBlue: () => S({ map: t.metal, color: 0x6688bb, roughness: 0.6, metalness: 0.4 }),
+      metalRed: () => S({ map: t.metal, color: 0xbb5544, roughness: 0.6, metalness: 0.4 }),
+      metal: () => S({ map: t.metal, roughness: 0.6, metalness: 0.5 }),
+      steel: () => S({ color: 0xbbbbbb, metalness: 0.85, roughness: 0.35 }),
+      bark: () => S({ map: t.bark, roughness: 0.95 }),
+      brick: () => S({ map: t.brick, roughness: 0.9 }),
+      rock: () => S({ map: t.rock, roughness: 0.95 }),
+      redrock: () => S({ map: t.redrock, color: 0xd8a080, roughness: 0.95 }),
+      dark: () => S({ color: 0x1c1c1c, roughness: 0.8 }),
+      white: () => S({ color: 0xeeeeee, roughness: 0.7 }),
+      stripe: () => S({ color: 0xd8b020, roughness: 0.7 }),
+      lamp: () => S({ color: 0xffffff, emissive: 0xfff0c8, emissiveIntensity: 1.2 }),
+    }[name];
+    return (this.mats[name] = m ? m() : S({ color: 0xff00ff }));
+  }
+
+  // ---------------------------------------------------------------------
   buildRoads() {
-    // a closed circuit through the hills plus a spur back to the pad
-    const pts = [];
-    const N = 14;
-    for (let i = 0; i < N; i++) {
-      const a = (i / N) * Math.PI * 2;
-      const r = 300 + this.noise(i * 0.7, 3.3) * 120 + (i % 2 ? 25 : -15);
-      pts.push(new THREE.Vector3(Math.cos(a) * r, 0, Math.sin(a) * r * 0.92));
-    }
-    const loop = new THREE.CatmullRomCurve3(pts, true, 'centripetal');
-    const spurPts = [new THREE.Vector3(0, 0, 100), new THREE.Vector3(10, 0, 160), new THREE.Vector3(-20, 0, 220)];
-    // end the spur on the loop point closest to its tip
-    const tip = spurPts[spurPts.length - 1];
-    let best = null, bd = Infinity;
-    for (let i = 0; i < 400; i++) { const p = loop.getPointAt(i / 400); const d = p.distanceTo(tip); if (d < bd) { bd = d; best = p; } }
-    spurPts.push(best.clone());
-    const spur = new THREE.CatmullRomCurve3(spurPts, false, 'centripetal');
-
     this.roads = [];
-    for (const [curve, closed] of [[loop, true], [spur, false]]) {
-      const len = curve.getLength();
-      const n = Math.ceil(len / 3);
-      const p = [];
-      for (let i = 0; i <= n; i++) {
-        if (closed && i === n) break;
-        const v = curve.getPointAt(i / n);
-        p.push({ x: v.x, z: v.z, y: this.naturalHeight(v.x, v.z), s: (i / n) * len });
-      }
-      // smooth the road profile so grades are drivable
-      for (let pass = 0; pass < 30; pass++) {
-        const ys = p.map(q => q.y);
-        for (let i = 0; i < p.length; i++) {
-          let sum = 0, c = 0;
-          for (let k = -6; k <= 6; k++) {
-            let j = i + k;
-            if (closed) j = (j + p.length) % p.length; else if (j < 0 || j >= p.length) continue;
-            sum += ys[j]; c++;
-          }
-          p[i].y = sum / c;
+    const defs = this.def.roads ? this.def.roads(this) : [];
+    for (const r of defs) {
+      const closed = !!r.closed;
+      let samples = [];
+      if (r.poly) {
+        // straight segments
+        const P = r.pts;
+        let s = 0;
+        const segs = closed ? P.length : P.length - 1;
+        for (let i = 0; i < segs; i++) {
+          const a = P[i], b = P[(i + 1) % P.length];
+          const L = Math.hypot(b.x - a.x, b.z - a.z), n = Math.max(1, Math.ceil(L / 3));
+          for (let k = 0; k < n; k++) samples.push({ x: a.x + (b.x - a.x) * k / n, z: a.z + (b.z - a.z) * k / n, s: s + L * k / n });
+          s += L;
         }
-        if (!closed) { p[0].y = 0; }
+        if (!closed) { const b = P[P.length - 1]; samples.push({ x: b.x, z: b.z, s }); }
+      } else {
+        const curve = new THREE.CatmullRomCurve3(r.pts, closed, 'centripetal');
+        const len = curve.getLength(), n = Math.ceil(len / 3);
+        for (let i = 0; i <= n; i++) {
+          if (closed && i === n) break;
+          const v = curve.getPointAt(i / n);
+          samples.push({ x: v.x, z: v.z, s: (i / n) * len });
+        }
       }
-      this.roads.push({ pts: p, closed, width: 10 });
+      const total = samples[samples.length - 1].s || 1;
+      for (const q of samples) {
+        if (r.flat !== undefined) q.y = r.flat;
+        else if (r.linear) q.y = r.linear[0] + (r.linear[1] - r.linear[0]) * q.s / total;
+        else q.y = this.naturalHeight(q.x, q.z);
+      }
+      if (r.flat === undefined && !r.linear) {
+        // smooth the profile so grades are drivable
+        for (let pass = 0; pass < (r.smooth ?? 30); pass++) {
+          const ys = samples.map(q => q.y);
+          for (let i = 0; i < samples.length; i++) {
+            let sum = 0, c = 0;
+            for (let k = -6; k <= 6; k++) {
+              let j = i + k;
+              if (closed) j = (j + samples.length) % samples.length; else if (j < 0 || j >= samples.length) continue;
+              sum += ys[j]; c++;
+            }
+            samples[i].y = sum / c;
+          }
+          if (!closed && r.startY !== undefined) samples[0].y = r.startY;
+        }
+      }
+      this.roads.push({ pts: samples, closed, width: 10, dirt: r.surface === 'dirt', markings: r.markings !== false, rails: r.rails });
     }
   }
 
-  // nearest road info for a point
-  roadQuery(x, z) {
-    let best = Infinity, bu = 0, bs = 0, by = 0;
-    for (const r of this.roads) {
+  // bucket road segments into a grid so lookups only test nearby ones
+  buildRoadGrid() {
+    const G = 32, M = 40;
+    this.segGrid = new Map();
+    this.roads.forEach((r, ri) => {
       const p = r.pts, n = p.length, segs = r.closed ? n : n - 1;
       for (let i = 0; i < segs; i++) {
         const a = p[i], b = p[(i + 1) % n];
-        // cheap reject
+        for (let cx = Math.floor((Math.min(a.x, b.x) - M) / G); cx <= Math.floor((Math.max(a.x, b.x) + M) / G); cx++)
+          for (let cz = Math.floor((Math.min(a.z, b.z) - M) / G); cz <= Math.floor((Math.max(a.z, b.z) + M) / G); cz++) {
+            const k = cx * 100003 + cz;
+            let l = this.segGrid.get(k); if (!l) this.segGrid.set(k, l = []);
+            l.push(ri, i);
+          }
+      }
+    });
+  }
+
+  // nearest road info for a point (within ~40 m)
+  roadQuery(x, z) {
+    let best = Infinity, bu = 0, bs = 0, by = 0, br = null;
+    if (!this.segGrid) this.buildRoadGrid();
+    const list = this.segGrid.get(Math.floor(x / 32) * 100003 + Math.floor(z / 32));
+    if (list) for (let li = 0; li < list.length; li += 2) {
+      const r = this.roads[list[li]], i = list[li + 1];
+      {
+        const p = r.pts, n = p.length;
+        const a = p[i], b = p[(i + 1) % n];
         const mx = Math.min(a.x, b.x) - 40, Mx = Math.max(a.x, b.x) + 40;
         if (x < mx || x > Mx) continue;
         const mz = Math.min(a.z, b.z) - 40, Mz = Math.max(a.z, b.z) + 40;
@@ -207,45 +268,69 @@ export class World {
           bu = cross > 0 ? d : -d;
           bs = a.s + Math.sqrt(L2) * t;
           by = a.y + (b.y - a.y) * t;
+          br = r;
         }
       }
     }
-    return { d: best, u: bu, s: bs, y: by };
+    return { d: best, u: bu, s: bs, y: by, road: br };
   }
 
   buildHeights() {
-    const R = this.res;
+    const R = this.res, def = this.def;
     this.h = new Float32Array(R * R);
     this.road = new Float32Array(R * R);
     this.dirt = new Float32Array(R * R);
     this.roadU = new Float32Array(R * R);
     this.roadS = new Float32Array(R * R);
+    const pads = def.pads || [];
     for (let j = 0; j < R; j++) for (let i = 0; i < R; i++) {
       const x = -this.half + i * this.cell, z = -this.half + j * this.cell;
       const k = j * R + i;
       let h = this.naturalHeight(x, z);
       const rq = this.roadQuery(x, z);
       const hw = 5;
-      const pad = Math.max(Math.abs(x), Math.abs(z));
-      let road = 1 - smoothstep(hw - 0.5, hw + 1.0, rq.d);
-      if (rq.d < 40) {
-        const b = 1 - smoothstep(hw + 1, hw + 14, rq.d);
-        h = h + (rq.y - h) * b;
+      let road = 0, dirtRoad = 0, u = rq.u;
+      if (rq.road) {
+        const w = 1 - smoothstep(hw - 0.5, hw + 1.0, rq.d);
+        if (rq.road.dirt) dirtRoad = w; else road = w;
+        if (!rq.road.markings) u = 99;
+        if (rq.d < 40) {
+          const b = 1 - smoothstep(hw + 1, hw + 14, rq.d);
+          h = h + (rq.y - h) * b;
+        }
       }
-      if (pad < 100) { road = Math.max(road, 1 - smoothstep(95, 100, pad)); }
+      for (const p of pads) {
+        const hx = p.hx ?? p.half, hz = p.hz ?? p.half;
+        const dx = Math.abs(x - p.x), dz = Math.abs(z - p.z);
+        // normalised distance: <1 inside the pad
+        const n = p.round ? Math.hypot(dx / hx, dz / hz) : Math.max(dx / hx, dz / hz);
+        const b = 1 - smoothstep(1, 1 + (p.blend ?? 60) / hx, n);
+        h = h + (p.y - h) * b;
+        if (n < 1) {
+          const w = 1 - smoothstep(1 - 5 / hx, 1, n);
+          if (p.surface === 'dirt') dirtRoad = Math.max(dirtRoad, w);
+          else if (p.surface !== 'ground') { road = Math.max(road, w); u = 99; }
+        }
+      }
       this.h[k] = h;
       this.road[k] = road;
-      this.roadU[k] = pad < 100 ? 99 : rq.u;
+      this.roadU[k] = u;
       this.roadS[k] = rq.s;
-      const dn = this.noise(x * 0.02 + 50, z * 0.02) * 0.5 + 0.5;
-      this.dirt[k] = Math.min(1, smoothstep(0.55, 0.75, dn) + (1 - smoothstep(hw + 1, hw + 3.5, rq.d)) * 0.8) * (1 - road);
+      let dirt;
+      if (def.dirt) dirt = def.dirt(x, z, this, rq);
+      else {
+        const dn = this.noise(x * 0.02 + 50, z * 0.02) * 0.5 + 0.5;
+        dirt = Math.min(1, smoothstep(0.55, 0.75, dn) + (1 - smoothstep(hw + 1, hw + 3.5, rq.d)) * 0.8);
+      }
+      this.dirt[k] = Math.max(dirtRoad, Math.min(1, dirt)) * (1 - road);
     }
-    // slope-based dirt (needs heights)
+    // steep slopes show the dirt/rock layer
+    const sl = def.slopeDirt ?? 0.45;
     for (let j = 1; j < R - 1; j++) for (let i = 1; i < R - 1; i++) {
       const k = j * R + i;
       const sx = (this.h[k + 1] - this.h[k - 1]) / (2 * this.cell), sz = (this.h[k + R] - this.h[k - R]) / (2 * this.cell);
       const slope = Math.hypot(sx, sz);
-      this.dirt[k] = Math.max(this.dirt[k], smoothstep(0.45, 0.8, slope) * (1 - this.road[k]));
+      this.dirt[k] = Math.max(this.dirt[k], smoothstep(sl, sl + 0.35, slope) * (1 - this.road[k]));
     }
   }
 
@@ -288,7 +373,7 @@ export class World {
     if (depth <= 0) return 0;
     out.nx = nx; out.ny = ny; out.nz = nz;
     const rd = this.road[k], dt = this.dirt[k];
-    out.friction = rd * 1.0 + (1 - rd) * (0.78 - dt * 0.12);
+    out.friction = rd * this.fr.road + (1 - rd) * (this.fr.ground + (this.fr.dirt - this.fr.ground) * dt);
     return depth;
   }
 
@@ -334,7 +419,7 @@ export class World {
 
   // ---------------------------------------------------------------------
   buildTerrainMesh() {
-    const R = this.res;
+    const R = this.res, def = this.def;
     const pos = new Float32Array(R * R * 3);
     for (let j = 0; j < R; j++) for (let i = 0; i < R; i++) {
       const k = j * R + i;
@@ -358,36 +443,45 @@ export class World {
     geo.setIndex(new THREE.BufferAttribute(idx, 1));
     geo.computeVertexNormals();
 
-    const t = this.tex;
+    const t = this.tex, L = Object.assign({ ground: 'grass', dirt: 'dirt', road: 'asphalt', groundScale: 9, dirtScale: 5, groundTint: [0.95, 1.02, 0.9], dirtTint: [0.72, 0.64, 0.55], snowLine: 1e5 }, def.layers);
+    const v3 = (a) => new THREE.Vector3(...a);
     const mat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.95, metalness: 0 });
     mat.onBeforeCompile = (sh) => {
-      sh.uniforms.tGrass = { value: t.grass };
-      sh.uniforms.tDirt = { value: t.dirt };
-      sh.uniforms.tAsphalt = { value: t.asphalt };
+      sh.uniforms.tGrass = { value: t[L.ground] };
+      sh.uniforms.tDirt = { value: t[L.dirt] };
+      sh.uniforms.tAsphalt = { value: t[L.road] };
+      sh.uniforms.tSnow = { value: t.snow };
+      sh.uniforms.uGTint = { value: v3(L.groundTint) };
+      sh.uniforms.uDTint = { value: v3(L.dirtTint) };
+      sh.uniforms.uScale = { value: new THREE.Vector2(L.groundScale, L.dirtScale) };
+      sh.uniforms.uSnow = { value: L.snowLine };
       sh.vertexShader = sh.vertexShader
         .replace('#include <common>', `#include <common>
           attribute float aRoad; attribute float aDirt; attribute float aRoadU; attribute float aRoadS;
-          varying float vRoad; varying float vDirt; varying float vRoadU; varying float vRoadS; varying vec3 vWPos;`)
+          varying float vRoad; varying float vDirt; varying float vRoadU; varying float vRoadS; varying vec3 vWPos; varying vec3 vWNorm;`)
         .replace('#include <begin_vertex>', `#include <begin_vertex>
-          vRoad = aRoad; vDirt = aDirt; vRoadU = aRoadU; vRoadS = aRoadS; vWPos = (modelMatrix * vec4(position,1.0)).xyz;`);
+          vRoad = aRoad; vDirt = aDirt; vRoadU = aRoadU; vRoadS = aRoadS; vWPos = (modelMatrix * vec4(position,1.0)).xyz; vWNorm = normal;`);
       sh.fragmentShader = sh.fragmentShader
         .replace('#include <common>', `#include <common>
-          uniform sampler2D tGrass; uniform sampler2D tDirt; uniform sampler2D tAsphalt;
-          varying float vRoad; varying float vDirt; varying float vRoadU; varying float vRoadS; varying vec3 vWPos;
+          uniform sampler2D tGrass; uniform sampler2D tDirt; uniform sampler2D tAsphalt; uniform sampler2D tSnow;
+          uniform vec3 uGTint; uniform vec3 uDTint; uniform vec2 uScale; uniform float uSnow;
+          varying float vRoad; varying float vDirt; varying float vRoadU; varying float vRoadS; varying vec3 vWPos; varying vec3 vWNorm;
           vec3 antiTile(sampler2D s, vec2 uv){
-            // blend two rotated/scaled lookups to hide repetition
             vec3 a = texture2D(s, uv).rgb;
             vec3 b = texture2D(s, uv * 0.27 + vec2(0.37, 0.71)).rgb;
             return mix(a, b, 0.4);
           }`)
         .replace('#include <map_fragment>', `
           vec2 wuv = vWPos.xz;
-          vec3 grass = antiTile(tGrass, wuv / 9.0) * vec3(0.95, 1.02, 0.9);
-          vec3 dirt = antiTile(tDirt, wuv / 5.0) * vec3(0.72, 0.64, 0.55);
+          vec3 grass = antiTile(tGrass, wuv / uScale.x) * uGTint;
+          vec3 dirt = antiTile(tDirt, wuv / uScale.y) * uDTint;
           vec3 asph = antiTile(tAsphalt, wuv / 5.0) * 0.85;
           float rw = smoothstep(0.35, 0.65, vRoad);
-          vec3 col = mix(mix(grass, dirt, smoothstep(0.2, 0.8, vDirt)), asph, rw);
-          // lane markings
+          vec3 col = mix(grass, dirt, smoothstep(0.2, 0.8, vDirt));
+          // snow on high ground, thinning on steep faces
+          float sn = smoothstep(uSnow - 8.0, uSnow + 8.0, vWPos.y + (texture2D(tDirt, wuv / 31.0).r - 0.5) * 18.0) * smoothstep(0.55, 0.8, normalize(vWNorm).y);
+          col = mix(col, antiTile(tSnow, wuv / 6.0) * 1.05, sn);
+          col = mix(col, asph, rw);
           float au = abs(vRoadU);
           float dash = step(fract(vRoadS / 9.0), 0.5);
           float center = (1.0 - smoothstep(0.08, 0.13, au)) * dash;
@@ -399,16 +493,16 @@ export class World {
     };
     const mesh = new THREE.Mesh(geo, mat);
     mesh.receiveShadow = true;
-    this.scene.add(mesh);
+    this.add(mesh);
     this.terrainMesh = mesh;
   }
 
-  addBox(cx, cy, cz, hx, hy, hz, yaw, pitch, roll, material, friction = 0.9, uvScale = 1) {
+  // static box: collider + (batched) mesh
+  addBox(cx, cy, cz, hx, hy, hz, yaw, pitch, roll, material, friction = 0.9, uvScale = 1, collide = true) {
     const box = new Box(cx, cy, cz, hx, hy, hz, yaw, pitch, roll, friction);
-    this.colliders.push(box);
+    if (collide) this.colliders.push(box);
     if (material) {
       const g = new THREE.BoxGeometry(hx * 2, hy * 2, hz * 2);
-      // world-scaled UVs so textures don't stretch
       const uv = g.attributes.uv, n = g.attributes.normal, p = g.attributes.position;
       for (let i = 0; i < uv.count; i++) {
         const ax = Math.abs(n.getX(i)), ay = Math.abs(n.getY(i));
@@ -416,126 +510,180 @@ export class World {
         const v = ay > 0.5 ? p.getZ(i) : p.getY(i);
         uv.setXY(i, u / (2 * uvScale), v / (2 * uvScale));
       }
-      const m = new THREE.Mesh(g, material);
-      m.position.copy(box.c); m.quaternion.copy(box.quat);
-      m.castShadow = true; m.receiveShadow = true;
-      this.scene.add(m);
+      g.applyQuaternion(box.quat);
+      g.translate(cx, cy, cz);
+      this.batch(material, g);
     }
     return box;
   }
 
-  buildProvingGround() {
-    const t = this.tex;
-    const concrete = new THREE.MeshStandardMaterial({ map: t.concrete, normalMap: t.concreteN, roughness: 0.9 });
-    const metalBlue = new THREE.MeshStandardMaterial({ map: t.metal, color: 0x6688bb, roughness: 0.6, metalness: 0.4 });
-    const metalRed = new THREE.MeshStandardMaterial({ map: t.metal, color: 0xbb5544, roughness: 0.6, metalness: 0.4 });
-    const ramp = new THREE.MeshStandardMaterial({ map: t.wood, color: 0xd8c6a0, roughness: 0.8 });
-    const D = Math.PI / 180;
+  addCapsule(ax, ay, az, bx, by, bz, r, friction = 0.8) {
+    const c = new Capsule(ax, ay, az, bx, by, bz, r, friction);
+    this.colliders.push(c);
+    return c;
+  }
 
-    // curved kicker ramps built from tilted box segments (forward = local +z rotated by yaw)
-    const mkRamp = (x, z, yaw, angles, segLen, width, y0 = 0) => {
-      const th = 0.5, fx = Math.sin(yaw), fz = Math.cos(yaw);
-      let s = 0, h = y0;
-      for (const ang of angles) {
-        const a = ang * D;
-        const L = segLen + 0.08; // slight overlap hides seams
-        const cs = Math.cos(a), sn = Math.sin(a);
-        // centre of the segment, pushed down by half the thickness along its normal
-        const cs_ = s + cs * segLen / 2 + sn * th / 2, ch = h + sn * segLen / 2 - cs * th / 2;
-        this.addBox(x + fx * cs_, ch, z + fz * cs_, width / 2, th / 2, L / 2, yaw, -a, 0, ramp, 0.9, 2);
-        s += cs * segLen; h += sn * segLen;
+  batch(material, geo) {
+    if (!this.batches.has(material)) this.batches.set(material, []);
+    this.batches.get(material).push(geo);
+  }
+
+  // merge all static geometry per material: a handful of draw calls per map
+  flushBatches() {
+    for (const [mat, geos] of this.batches) {
+      let nv = 0, ni = 0;
+      for (const g of geos) { nv += g.attributes.position.count; ni += g.index ? g.index.count : g.attributes.position.count; }
+      const pos = new Float32Array(nv * 3), nor = new Float32Array(nv * 3), uv = new Float32Array(nv * 2);
+      const idx = new Uint32Array(ni);
+      let vo = 0, io = 0;
+      for (const g of geos) {
+        const n = g.attributes.position.count;
+        pos.set(g.attributes.position.array, vo * 3);
+        if (g.attributes.normal) nor.set(g.attributes.normal.array, vo * 3);
+        if (g.attributes.uv) uv.set(g.attributes.uv.array, vo * 2);
+        if (g.index) { const ix = g.index.array; for (let i = 0; i < ix.length; i++) idx[io++] = ix[i] + vo; }
+        else for (let i = 0; i < n; i++) idx[io++] = vo + i;
+        vo += n;
+        g.dispose();
       }
-      return { s, h };
-    };
-    mkRamp(-40, -26, 0, [4, 8, 12], 3, 6);
-    mkRamp(-25, -28, 0, [5, 10, 15, 18], 3, 6);
-    // big jump toward +x with a table and a landing slope
-    mkRamp(-24, 40, Math.PI / 2, [3, 6, 9, 12, 15], 3.2, 8);
-    // landing table + slope back down (approach from -x at ~70 km/h)
-    this.addBox(14, 0.7, 40, 8, 0.7, 6, Math.PI / 2, 0, 0, concrete, 0.8, 3);
-    mkRamp(20 + 13.2, 40, -Math.PI / 2, [6, 6, 6, 6], 3.3, 16, 0);
-    // side-tilted "two wheel" ramp
-    this.addBox(40, 0.2, -40, 2, 0.6, 10, 0, 0, 14 * D, ramp, 0.9, 2);
-
-    // crash walls
-    this.addBox(0, 2, -92, 30, 2, 1.5, 0, 0, 0, concrete, 0.8, 3);
-    this.addBox(80, 2, 0, 1.5, 2, 20, 0, 0, 0, concrete, 0.8, 3);
-    // pole to wrap a car around
-    const pole = new Capsule(60, -1, -60, 60, 6, -60, 0.25);
-    this.colliders.push(pole);
-    const pm = new THREE.Mesh(new THREE.CylinderGeometry(0.25, 0.25, 7, 16), new THREE.MeshStandardMaterial({ color: 0xbbbbbb, metalness: 0.8, roughness: 0.35 }));
-    pm.position.set(60, 2.5, -60); pm.castShadow = true; this.scene.add(pm);
-
-    // jersey barriers lining a slalom
-    for (let i = 0; i < 8; i++) this.addBox(-70 + i * 3.4, 0.45, 70, 1.6, 0.45, 0.3, 0, 0, 0, concrete, 0.8, 1);
-    // shipping containers
-    const cmat = [metalBlue, metalRed];
-    for (let i = 0; i < 5; i++) this.addBox(-85, 1.3, -60 + i * 3, 6.1, 1.3, 1.22, 0, 0, 0, cmat[i % 2], 0.6, 2);
-    this.addBox(-85, 3.9, -54, 6.1, 1.3, 1.22, 0, 0, 0, metalBlue, 0.6, 2);
-
-    // log bumps (washboard)
-    const logMat = new THREE.MeshStandardMaterial({ map: t.bark, roughness: 0.95 });
-    for (let i = 0; i < 9; i++) {
-      const z = 10 + i * 3.2;
-      const cap = new Capsule(45, -0.05, z, 55, -0.05, z, 0.2, 0.9);
-      this.colliders.push(cap);
-      const m = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.2, 10, 10), logMat);
-      m.rotation.z = Math.PI / 2; m.position.set(50, -0.05, z); m.castShadow = true; m.receiveShadow = true;
-      this.scene.add(m);
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+      geo.setAttribute('normal', new THREE.BufferAttribute(nor, 3));
+      geo.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+      geo.setIndex(new THREE.BufferAttribute(idx, 1));
+      geo.computeBoundingSphere();
+      const m = new THREE.Mesh(geo, mat);
+      m.castShadow = true; m.receiveShadow = true;
+      this.add(m);
     }
+    this.batches.clear();
+  }
 
-    // banked turn / quarter pipe made of segments
-    for (let i = 0; i < 7; i++) {
-      const a = (i / 6) * Math.PI * 0.5;
-      const r = 14;
-      const yaw = -a;
-      const x = 20 + Math.sin(a) * r, z = -70 + Math.cos(a) * r;
-      this.addBox(x, 0.6, z, 2.4, 0.4, 4.5, yaw, 0, 25 * D, concrete, 0.9, 2);
+  // any geometry placed in world space joins the batch for its material
+  addMesh(geo, material) { this.batch(material, geo.index ? geo : geo); }
+
+  // curved kicker ramp from tilted box segments, forward = (sin yaw, cos yaw)
+  mkRamp(x, z, yaw, angles, segLen, width, y0 = 0, material = this.mat('wood')) {
+    const th = 0.5, fx = Math.sin(yaw), fz = Math.cos(yaw), D = Math.PI / 180;
+    let s = 0, h = y0;
+    for (const ang of angles) {
+      const a = ang * D;
+      const L = segLen + 0.08;
+      const cs = Math.cos(a), sn = Math.sin(a);
+      const cs_ = s + cs * segLen / 2 + sn * th / 2, ch = h + sn * segLen / 2 - cs * th / 2;
+      this.addBox(x + fx * cs_, ch, z + fz * cs_, width / 2, th / 2, L / 2, yaw, -a, 0, material, 0.9, 2);
+      s += cs * segLen; h += sn * segLen;
+    }
+    return { s, h };
+  }
+
+  // guardrail along a road edge where the ground drops away
+  addGuardrails(road, side, minDrop = 1.5) {
+    const p = road.pts, n = p.length, steel = this.mat('steel'), post = this.mat('dark');
+    const segs = road.closed ? n : n - 1;
+    for (let i = 0; i < segs; i += 2) {
+      if (!road.closed && i + 2 >= n) break;
+      const a = p[i], b = p[(i + 2) % n];
+      const dx = b.x - a.x, dz = b.z - a.z, L = Math.hypot(dx, dz);
+      if (L < 0.1) continue;
+      const nx = -dz / L * side, nz = dx / L * side;
+      const off = 5.6;
+      const mx = (a.x + b.x) / 2 + nx * off, mz = (a.z + b.z) / 2 + nz * off;
+      const drop = (a.y + b.y) / 2 - this.naturalHeight(mx + nx * 6, mz + nz * 6);
+      if (drop < minDrop) continue;
+      const ay = a.y + 0.55, by = b.y + 0.55;
+      this.addCapsule(a.x + nx * off, ay, a.z + nz * off, b.x + nx * off, by, b.z + nz * off, 0.16, 0.5);
+      const g = new THREE.BoxGeometry(0.06, 0.32, L + 0.1);
+      g.applyQuaternion(new THREE.Quaternion().setFromEuler(new THREE.Euler(-Math.atan2(by - ay, L), Math.atan2(dx, dz), 0, 'YXZ')));
+      g.translate(mx, (ay + by) / 2, mz);
+      this.batch(steel, g);
+      const pg = new THREE.BoxGeometry(0.1, 0.8, 0.1); pg.translate(a.x + nx * (off + 0.08), a.y + 0.3, a.z + nz * (off + 0.08));
+      this.batch(post, pg);
     }
   }
 
+  // ---------------------------------------------------------------------
   buildTrees() {
-    const cnt = this.quality.trees;
-    const trunks = [], tops = [];
+    const list = this.def.trees ? [].concat(this.def.trees) : [];
+    for (const T of list) this.buildTreeLayer(T);
+  }
+
+  buildTreeLayer(T) {
+    const cnt = Math.round(this.quality.trees * (T.density ?? 1));
+    const items = [];
     let tries = 0;
-    while (trunks.length < cnt && tries++ < cnt * 20) {
-      const x = (this.rnd() - 0.5) * (this.size - 120), z = (this.rnd() - 0.5) * (this.size - 120);
-      if (Math.max(Math.abs(x), Math.abs(z)) < 115) continue;
+    const margin = 60;
+    while (items.length < cnt && tries++ < cnt * 30) {
+      const x = (this.rnd() - 0.5) * (this.size - margin * 2), z = (this.rnd() - 0.5) * (this.size - margin * 2);
+      if (T.avoid && T.avoid(x, z, this)) continue;
       const rq = this.roadQuery(x, z);
       if (rq.d < 10) continue;
+      const k = this._k(x, z);
+      if (this.road[k] > 0.1) continue;
       const cluster = this.noise(x * 0.01 + 20, z * 0.01 - 9);
-      if (cluster < -0.05 && this.rnd() > 0.15) continue;
+      if (cluster < (T.cluster ?? -0.05) && this.rnd() > 0.15) continue;
       const y = this.heightAt(x, z);
+      if (T.maxY !== undefined && y > T.maxY + this.rnd() * 20) continue;
       const s = 0.8 + this.rnd() * 0.7;
-      trunks.push([x, y, z, s]);
-      this.colliders.push(new Capsule(x, y - 1, z, x, y + 6 * s, z, 0.28 * s, 0.7));
+      items.push([x, y, z, s]);
     }
-    const dummy = new THREE.Object3D();
-    const trunkGeo = new THREE.CylinderGeometry(0.18, 0.3, 4, 7); trunkGeo.translate(0, 2, 0);
-    const topGeo = new THREE.ConeGeometry(2.2, 7, 8); topGeo.translate(0, 6.5, 0);
-    const topGeo2 = new THREE.ConeGeometry(1.7, 5, 8); topGeo2.translate(0, 9, 0);
-    const trunkMat = new THREE.MeshStandardMaterial({ map: this.tex.bark, roughness: 1 });
-    const leafMat = new THREE.MeshStandardMaterial({ color: 0x2f5a2a, roughness: 0.95, flatShading: true });
-    const im1 = new THREE.InstancedMesh(trunkGeo, trunkMat, trunks.length);
-    const im2 = new THREE.InstancedMesh(topGeo, leafMat, trunks.length);
-    const im3 = new THREE.InstancedMesh(topGeo2, leafMat, trunks.length);
-    const col = new THREE.Color();
-    trunks.forEach(([x, y, z, s], i) => {
-      dummy.position.set(x, y - 0.2, z); dummy.scale.setScalar(s); dummy.rotation.y = this.rnd() * 6.28; dummy.updateMatrix();
-      im1.setMatrixAt(i, dummy.matrix); im2.setMatrixAt(i, dummy.matrix); im3.setMatrixAt(i, dummy.matrix);
-      col.setHSL(0.27 + this.rnd() * 0.08, 0.35 + this.rnd() * 0.2, 0.55 + this.rnd() * 0.2);
-      im2.setColorAt(i, col); im3.setColorAt(i, col);
+    const dummy = new THREE.Object3D(), col = new THREE.Color();
+    const kinds = {
+      pine: () => {
+        const trunk = new THREE.CylinderGeometry(0.18, 0.3, 4, 7); trunk.translate(0, 2, 0);
+        const t1 = new THREE.ConeGeometry(2.2, 7, 8); t1.translate(0, 6.5, 0);
+        const t2 = new THREE.ConeGeometry(1.7, 5, 8); t2.translate(0, 9, 0);
+        const leaf = new THREE.MeshStandardMaterial({ color: 0x2f5a2a, roughness: 0.95, flatShading: true });
+        return { parts: [[trunk, this.mat('bark'), false], [t1, leaf, true], [t2, leaf, true]], r: 0.28, h: 6, hue: [0.27, 0.08, 0.35, 0.55] };
+      },
+      cactus: () => {
+        const trunk = new THREE.CylinderGeometry(0.28, 0.32, 5, 9); trunk.translate(0, 2.5, 0);
+        const top = new THREE.SphereGeometry(0.28, 9, 6, 0, Math.PI * 2, 0, Math.PI / 2); top.translate(0, 5, 0);
+        const arm1 = new THREE.CylinderGeometry(0.2, 0.2, 1.6, 8); arm1.translate(0.75, 3.3, 0);
+        const arm1b = new THREE.CylinderGeometry(0.2, 0.2, 0.75, 8); arm1b.rotateZ(Math.PI / 2); arm1b.translate(0.42, 2.55, 0);
+        const arm2 = new THREE.CylinderGeometry(0.18, 0.18, 1.2, 8); arm2.translate(-0.7, 3.0, 0);
+        const arm2b = new THREE.CylinderGeometry(0.18, 0.18, 0.7, 8); arm2b.rotateZ(Math.PI / 2); arm2b.translate(-0.4, 2.45, 0);
+        const g = mergeSimple([trunk, top, arm1, arm1b, arm2, arm2b]);
+        const m = new THREE.MeshStandardMaterial({ color: 0x5f7f3a, roughness: 0.8 });
+        return { parts: [[g, m, true]], r: 0.35, h: 5, hue: [0.22, 0.06, 0.35, 0.4] };
+      },
+      boulder: () => {
+        const g = new THREE.DodecahedronGeometry(1.6, 0); g.translate(0, 0.5, 0);
+        return { parts: [[g, this.mat(T.rockMat || 'rock'), false]], r: 1.4, h: 1.2, sphere: true, hue: null };
+      },
+      lamp: null,
+    };
+    const spec = kinds[T.kind || 'pine']();
+    const meshes = spec.parts.map(([g, m, tint]) => { const im = new THREE.InstancedMesh(g, m, items.length); im.userData.tint = tint; return im; });
+    items.forEach(([x, y, z, s], i) => {
+      dummy.position.set(x, y - (spec.sphere ? 0.6 * s : 0.2), z);
+      dummy.scale.setScalar(s); dummy.rotation.set(spec.sphere ? this.rnd() * 3 : 0, this.rnd() * 6.28, 0); dummy.updateMatrix();
+      for (const im of meshes) {
+        im.setMatrixAt(i, dummy.matrix);
+        if (im.userData.tint && spec.hue) { const h = spec.hue; col.setHSL(h[0] + this.rnd() * h[1], h[2] + this.rnd() * 0.2, h[3] + this.rnd() * 0.2); im.setColorAt(i, col); }
+      }
+      if (spec.sphere) this.addCapsule(x, y + 0.2 * s, z, x, y + 0.25 * s, z, spec.r * s, 0.8);
+      else this.addCapsule(x, y - 1, z, x, y + spec.h * s, z, spec.r * s, 0.7);
     });
-    for (const m of [im1, im2, im3]) { m.castShadow = true; m.receiveShadow = true; this.scene.add(m); }
+    for (const m of meshes) { m.castShadow = true; m.receiveShadow = true; this.add(m); }
   }
 
-  // fresh crate positions for the stack on the pad
-  crateSpots() {
-    const spots = [];
-    let id = 0;
-    for (let row = 0; row < 4; row++) for (let i = 0; i < 4 - row; i++) {
-      spots.push([30 + (i + row * 0.5) * 1.25 - 2, 0.6 + row * 1.2, -20, id++]);
-    }
-    return spots;
+  _k(x, z) {
+    const R = this.res;
+    const i = Math.max(0, Math.min(R - 1, Math.round((x + this.half) / this.cell)));
+    const j = Math.max(0, Math.min(R - 1, Math.round((z + this.half) / this.cell)));
+    return j * R + i;
   }
+}
+
+function mergeSimple(geos) {
+  const parts = geos.map(g => g.index ? g.toNonIndexed() : g);
+  let n = 0; for (const g of parts) n += g.attributes.position.count;
+  const pos = new Float32Array(n * 3), nor = new Float32Array(n * 3);
+  let o = 0;
+  for (const g of parts) { pos.set(g.attributes.position.array, o * 3); nor.set(g.attributes.normal.array, o * 3); o += g.attributes.position.count; }
+  const out = new THREE.BufferGeometry();
+  out.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  out.setAttribute('normal', new THREE.BufferAttribute(nor, 3));
+  return out;
 }

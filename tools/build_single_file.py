@@ -2,7 +2,7 @@
 # sky HDR inlined as a data URI). Usage: python3 tools/build_single_file.py . out/index.html
 import re, sys, os, base64
 root = sys.argv[1]; out = sys.argv[2]
-order = ['physics','world','carbody','flexmesh','vehicle','props','input','audio','main']
+order = ['physics','world','maps','carbody','flexmesh','vehicle','props','input','audio','main']
 code = ["import * as THREE from 'three';", "import { RGBELoader } from 'three/addons/loaders/RGBELoader.js';"]
 for m in order:
     s = open(f'{root}/src/{m}.js').read()

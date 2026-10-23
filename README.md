@@ -21,7 +21,14 @@ python3 -m http.server 8000
 - **Details**: panel gaps, an interior with seats, a dash and a steering wheel that turns, an engine bay, a grille, license plates, an exhaust, wipers, 5-spoke rims with brake discs and calipers, and visible control arms and coil springs.
 - **Node grabbing**: hold **Ctrl** and drag any node to pull a car around or flip it back over (on phones, use the ✋ Grab button).
 - **Deformable visuals**: the car body is a lofted mesh skinned to the physics nodes, so dents show up exactly where the structure deformed. Press **B** to see the nodes and beams colored by stress.
-- **World** (`src/world.js`): a 960 m procedural terrain with a road circuit (lane markings, smoothed grades) and forest. There's a proving ground with curved jump ramps, a landing table, crash walls, a pole, log bumps, a banked turn, shipping containers, and stacks of breakable crates. Two parked cars are there to crash into.
+- **Five maps** (`src/maps.js`, pick one in the menu):
+  - **Proving Grounds**: hills, a road circuit and a test pad with jumps, walls and crates.
+  - **Desert Canyon**: dunes, red rock mesas, a 1 km drag strip, a gas station and a dirt jump park.
+  - **Alpine Pass**: a switchback mountain road with guardrails, snow on the peaks and a jump off the summit.
+  - **Downtown**: a street grid with curbs, towers, street lights, parked cars and a stunt plaza.
+  - **Derby Arena**: a walled dirt oval where four AI cars try to ram you.
+- **Self-collision**: a car's own nodes push each other apart. Push-only braces stop doors, hoods and trunks from being shoved into the car.
+- **Proving Grounds details** (`src/world.js` builds every map): a 960 m procedural terrain with a road circuit (lane markings, smoothed grades) and forest. There's a proving ground with curved jump ramps, a landing table, crash walls, a pole, log bumps, a banked turn, shipping containers, and stacks of breakable crates. Two parked cars are there to crash into.
 - **Performance**: flat typed arrays, no allocation in the physics loop, per-frame broad phase, and bodies at rest go to sleep. If a device can't keep up, the game slows down instead of exploding.
 - Procedural WebAudio engine, tire squeal, wind, and crash sounds.
 - Works with keyboard, gamepad, and touch.

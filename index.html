@@ -42,6 +42,7 @@
   #panel.open { display: block; }
   #panel h3 { margin: 4px 0 8px; font-size: 12px; color: var(--dim); text-transform: uppercase; letter-spacing: 1px; }
   #panel select { width: 100%; font: inherit; color: var(--fg); background: #1b2028; border: 1px solid var(--line); border-radius: 8px; padding: 7px; margin-bottom: 10px; }
+  #panel .desc { margin: -4px 0 10px; color: var(--dim); font-size: 12px; }
   #colors { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
   #colors button { width: 26px; height: 26px; padding: 0; border-radius: 50%; border: 2px solid rgba(255,255,255,0.25); }
   .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
@@ -87,6 +88,9 @@
 </div>
 
 <div id="panel">
+  <h3>Map</h3>
+  <select id="mapSel"></select>
+  <p id="mapDesc" class="desc"></p>
   <h3>Vehicle</h3>
   <select id="vehSel"></select>
   <h3>Paint</h3>

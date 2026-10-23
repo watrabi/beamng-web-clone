@@ -105,6 +105,7 @@ export class Vehicle {
   build(pos, yaw) {
     const T = this.type, W = this.world, S = this.shape;
     const body = this.body = W.createBody(T.label);
+    body.selfCollide = true; body.selfTimer = 0; // panels can't pass through the car or themselves
     const cy = Math.cos(yaw), sy = Math.sin(yaw);
     this.spawn = { pos: pos.clone(), yaw };
     const toWorld = (x, y, z) => [pos.x + x * cy + z * sy, pos.y + y, pos.z - x * sy + z * cy];
@@ -217,8 +218,21 @@ export class Vehicle {
         }
       });
       if (o.support) {
-        // push-only stops so a loose panel can swing open but not fall into the car
+        // push-only braces reaching deep into the car: a loose panel can swing
+        // open but can't be pushed through the body (they can't be slipped past)
+        const [ix_, iy_, iz_] = o.inward;
         pts.forEach((q, i) => {
+          const cand = [];
+          for (const t of targets) {
+            const r = restMap.get(t);
+            const dx = r[0] - q.p[0], dy = r[1] - q.p[1], dz = r[2] - q.p[2], d = Math.hypot(dx, dy, dz);
+            if (d < 0.45 || d > 1.5) continue;
+            const al = (dx * ix_ + dy * iy_ + dz * iz_) / d;
+            if (al > 0.6) cand.push([al - d * 0.15, t, d]);
+          }
+          cand.sort((a, b) => b[0] - a[0]);
+          for (const [, t, d] of cand.slice(0, 2)) part.support.push(W.addBeam(body, ids[i], t, { type: BEAM_SUPPORT, k: 3e5, d: 80, rest: d - 0.015 }));
+          // plus a short stop to the nearest chassis node (also damps panel flutter)
           for (const t of nearest(q.p, targets, 1, 0.03, 0.6)) part.support.push(W.addBeam(body, ids[i], t, { type: BEAM_SUPPORT, k: 2.5e5, d: 60 }));
         });
       }
