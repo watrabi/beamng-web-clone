@@ -6,12 +6,12 @@
 <title>SoftBody Drive</title>
 <meta name="description" content="A soft-body driving sandbox in the browser: node/beam physics at 2000 Hz, deformable cars, ramps and crash tests.">
 <style>
-  :root { --fg: #f2f4f7; --dim: #9aa4b2; --panel: rgba(14, 17, 22, 0.78); --accent: #ff7a1a; --line: rgba(255,255,255,0.12); }
+  :root { color-scheme: dark; --fg: #f2f4f7; --dim: #9aa4b2; --panel: rgba(14, 17, 22, 0.78); --accent: #ff7a1a; --line: rgba(255,255,255,0.12); }
   * { box-sizing: border-box; }
   html, body { margin: 0; height: 100%; overflow: hidden; background: #0d1014; color: var(--fg); font: 13px/1.35 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; -webkit-user-select: none; user-select: none; touch-action: none; }
-  canvas { display: block; width: 100vw; height: 100vh; }
+  canvas { display: block; position: fixed; inset: 0; width: 100%; height: 100%; }
   .hud { position: fixed; pointer-events: none; }
-  #dash { right: 16px; bottom: 16px; width: 210px; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; backdrop-filter: blur(6px); }
+  #dash { right: calc(16px + env(safe-area-inset-right, 0px)); bottom: calc(16px + env(safe-area-inset-bottom, 0px)); width: 210px; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; backdrop-filter: blur(6px); }
   #dash .row { display: flex; align-items: baseline; justify-content: space-between; }
   #speed { font-size: 44px; font-weight: 700; font-variant-numeric: tabular-nums; letter-spacing: -1px; }
   #gear { font-size: 30px; font-weight: 700; color: var(--accent); width: 34px; text-align: center; }
@@ -22,7 +22,7 @@
   #dmgbar { background: linear-gradient(90deg, #ffcc00, #ff3b30); }
   .lbl { display: flex; justify-content: space-between; color: var(--dim); font-size: 11px; margin-top: 8px; font-variant-numeric: tabular-nums; }
   #stats { left: 16px; bottom: 12px; color: var(--dim); font-size: 11px; text-shadow: 0 1px 2px #000; }
-  #top { left: 16px; top: 12px; right: 16px; display: flex; gap: 8px; align-items: center; pointer-events: none; flex-wrap: wrap; }
+  #top { left: calc(16px + env(safe-area-inset-left, 0px)); top: calc(12px + env(safe-area-inset-top, 0px)); right: calc(16px + env(safe-area-inset-right, 0px)); display: flex; gap: 8px; align-items: center; pointer-events: none; flex-wrap: wrap; }
   #top button, #panel button, #panel select { pointer-events: auto; }
   button { font: inherit; color: var(--fg); background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 7px 11px; cursor: pointer; backdrop-filter: blur(6px); }
   button:hover { border-color: rgba(255,255,255,0.3); }
@@ -49,13 +49,13 @@
   #loading.ready #loadtxt { color: var(--fg); font-weight: 700; animation: pulse 1.2s infinite; }
   @keyframes pulse { 50% { opacity: 0.5; } }
   /* touch controls */
-  .touchctl { display: none; position: fixed; bottom: 18px; gap: 10px; }
+  .touchctl { display: none; position: fixed; bottom: calc(18px + env(safe-area-inset-bottom, 0px)); gap: 10px; }
   body.touch .touchctl { display: flex; }
   .touchctl div { width: 70px; height: 70px; border-radius: 50%; background: rgba(20,24,30,0.55); border: 2px solid rgba(255,255,255,0.25); display: flex; align-items: center; justify-content: center; font-weight: 800; font-size: 20px; backdrop-filter: blur(4px); }
   .touchctl div.on { background: rgba(255,122,26,0.55); }
-  #tl { left: 16px; } #tr { right: 16px; }
+  #tl { left: calc(16px + env(safe-area-inset-left, 0px)); } #tr { right: calc(16px + env(safe-area-inset-right, 0px)); }
   #tHb { position: absolute; right: 0; bottom: 82px; width: 70px !important; height: 40px !important; border-radius: 20px !important; font-size: 14px !important; }
-  body.touch #dash { bottom: auto; top: 60px; right: 16px; width: 150px; padding: 8px 10px; }
+  body.touch #dash { bottom: auto; top: calc(60px + env(safe-area-inset-top, 0px)); width: 150px; padding: 8px 10px; }
   body.touch #speed { font-size: 32px; }
   body.touch #stats { display: none; }
   @media (max-width: 600px) { .brand { display: none; } #top button { padding: 6px 8px; font-size: 12px; } }
