@@ -112,6 +112,8 @@ class Game {
     if (this.crates) for (const c of this.crates) c.dispose();
     this.phys = new SoftBodyWorld();
     this.phys.collider = this.worldMap;
+    this.grab = null;
+    this.phys.onSubstep.push((dt) => this.grabStep(dt));
     this.vehicles = [];
     this.crates = [];
     this.player = new Vehicle(this, this.vehicleType, new THREE.Vector3(0, 0.05, -10), 0, { controlled: true, color: this.color });
@@ -140,18 +142,7 @@ class Game {
   }
 
   respawnVehicle(v, pos, yaw) {
-    const W = this.phys;
-    const cy = Math.cos(yaw), sy = Math.sin(yaw);
-    v.nodes.forEach((id, i) => {
-      const [x, y, z] = v.restPos[i];
-      W.px[id] = pos.x + x * cy + z * sy; W.py[id] = pos.y + y; W.pz[id] = pos.z - x * sy + z * cy;
-      W.vx[id] = W.vy[id] = W.vz[id] = 0;
-    });
-    for (let b = v.body.beamStart; b < v.body.beamEnd; b++) { W.rest[b] = W.rest0[b]; W.broken[b] = 0; }
-    for (const w of v.wheels) { w.omega = 0; w.detached = false; }
-    W.deformEnergy[v.body.id] = 0;
-    W.wake(v.body);
-    v.gear = 1; v.steerSmooth = 0;
+    v.repair(pos, yaw);
     this.lastDamage = 0;
   }
 
@@ -213,7 +204,7 @@ class Game {
     for (const col of colors) {
       const b = document.createElement('button');
       b.style.background = '#' + col.toString(16).padStart(6, '0');
-      b.onclick = () => { this.color = col; this.player.mesh.material[0].color.setHex(col); };
+      b.onclick = () => { this.color = col; this.player.setColor(col); };
       cw.appendChild(b);
     }
     const act = {
@@ -227,16 +218,23 @@ class Game {
       tcs: () => { this.tcs = !this.tcs; $('bTcs').classList.toggle('off', !this.tcs); },
       sound: () => { this.audio.enabled = !this.audio.enabled; $('bSound').classList.toggle('off', !this.audio.enabled); },
       menu: () => $('panel').classList.toggle('open'),
+      grab: () => { this.grabMode = !this.grabMode; $('bGrab').classList.toggle('on', this.grabMode); },
     };
     document.querySelectorAll('[data-act]').forEach(b => b.addEventListener('click', (e) => { act[b.dataset.act](); b.blur(); }));
     for (const [id, key] of [['tGas', 'throttle'], ['tBrake', 'brake'], ['tLeft', 'left'], ['tRight', 'right'], ['tHb', 'handbrake']]) this.input.bindTouch($(id), key);
     if (isMobile) document.body.classList.add('touch');
 
-    // orbit camera with mouse / touch drag
+    // pointer: Ctrl (or the Grab button) + drag pulls a node, otherwise orbit the camera
     let drag = null;
-    this.canvas.addEventListener('pointerdown', (e) => { drag = { x: e.clientX, y: e.clientY }; });
-    addEventListener('pointerup', () => drag = null);
+    this.canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+    this.canvas.addEventListener('pointerdown', (e) => {
+      this.pointer = { x: e.clientX, y: e.clientY };
+      if (this.grabActive() && this.tryGrab(e.clientX, e.clientY, e.pointerType === 'touch' ? 60 : 36)) return;
+      drag = { x: e.clientX, y: e.clientY };
+    });
+    addEventListener('pointerup', () => { drag = null; this.releaseGrab(); });
     addEventListener('pointermove', (e) => {
+      this.pointer = { x: e.clientX, y: e.clientY };
       if (!drag) return;
       const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
       drag = { x: e.clientX, y: e.clientY };
@@ -246,8 +244,75 @@ class Game {
     this.canvas.addEventListener('wheel', (e) => { this.orbit.dist = Math.max(4, Math.min(40, this.orbit.dist * (1 + Math.sign(e.deltaY) * 0.1))); }, { passive: true });
   }
 
+  grabActive() { return this.grabMode || this.input.keys.has('ControlLeft') || this.input.keys.has('ControlRight') || this.input.keys.has('MetaLeft'); }
+
+  // pick the node closest to the pointer on screen
+  tryGrab(sx, sy, maxPx) {
+    const W = this.phys, cam = this.camera, v = new THREE.Vector3();
+    let best = -1, bd = maxPx * maxPx, bz = Infinity;
+    for (let i = 0; i < W.nodeCount; i++) {
+      if (!W.collides[i] && !W.selfColl[i]) continue;
+      v.set(W.px[i], W.py[i], W.pz[i]).project(cam);
+      if (v.z > 1 || v.z < -1) continue;
+      const x = (v.x + 1) / 2 * innerWidth, y = (1 - v.y) / 2 * innerHeight;
+      const d = (x - sx) ** 2 + (y - sy) ** 2;
+      if (d < bd - 4 || (d < bd + 4 && v.z < bz)) { bd = d; best = i; bz = v.z; }
+    }
+    if (best < 0) return false;
+    // spread the pull over the node and its beam neighbours so it doesn't just rip one node out
+    const body = W.bodies[W.body[best]];
+    const group = new Set([best]);
+    for (let b = body.beamStart; b < body.beamEnd && group.size < 9; b++) {
+      if (W.broken[b]) continue;
+      if (W.ba[b] === best) group.add(W.bb[b]); else if (W.bb[b] === best) group.add(W.ba[b]);
+    }
+    const p = new THREE.Vector3(W.px[best], W.py[best], W.pz[best]);
+    const n = new THREE.Vector3(); cam.getWorldDirection(n);
+    this.grab = { node: best, group: [...group], body, target: p.clone(), plane: new THREE.Plane().setFromNormalAndCoplanarPoint(n, p) };
+    W.wake(body);
+    if (!this.grabLine) {
+      const g = new THREE.BufferGeometry().setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(6), 3));
+      this.grabLine = new THREE.Line(g, new THREE.LineBasicMaterial({ color: 0xff7a1a, depthTest: false }));
+      this.grabLine.frustumCulled = false; this.grabLine.renderOrder = 12;
+      this.scene.add(this.grabLine);
+    }
+    this.grabLine.visible = true;
+    return true;
+  }
+
+  releaseGrab() { this.grab = null; if (this.grabLine) this.grabLine.visible = false; }
+
+  updateGrabTarget() {
+    const g = this.grab; if (!g || !this.pointer || !g.plane) return;
+    const ndc = new THREE.Vector2(this.pointer.x / innerWidth * 2 - 1, -(this.pointer.y / innerHeight) * 2 + 1);
+    const rc = this._rc || (this._rc = new THREE.Raycaster());
+    rc.setFromCamera(ndc, this.camera);
+    rc.ray.intersectPlane(g.plane, g.target);
+    const W = this.phys, i = g.node, a = this.grabLine.geometry.attributes.position.array;
+    a[0] = W.px[i]; a[1] = W.py[i]; a[2] = W.pz[i]; a[3] = g.target.x; a[4] = g.target.y; a[5] = g.target.z;
+    this.grabLine.geometry.attributes.position.needsUpdate = true;
+  }
+
+  // spring pulling the grabbed node toward the cursor (runs every physics substep)
+  grabStep() {
+    const g = this.grab; if (!g) return;
+    const W = this.phys, i = g.node;
+    let m = 0;
+    for (const n of g.group) m += W.mass[n];
+    const k = 30 * m + 9000, c = 2 * Math.sqrt(k * m);
+    let Fx = k * (g.target.x - W.px[i]) - c * W.vx[i];
+    let Fy = k * (g.target.y - W.py[i]) - c * W.vy[i];
+    let Fz = k * (g.target.z - W.pz[i]) - c * W.vz[i];
+    const F = Math.hypot(Fx, Fy, Fz), Fmax = 22000;
+    if (F > Fmax) { Fx *= Fmax / F; Fy *= Fmax / F; Fz *= Fmax / F; }
+    for (const n of g.group) {
+      const w = W.mass[n] / m;
+      W.fx[n] += Fx * w; W.fy[n] += Fy * w; W.fz[n] += Fz * w;
+    }
+  }
+
   cycleCam() { this.camMode = (this.camMode + 1) % 3; $('camName').textContent = ['Chase', 'Orbit', 'Hood'][this.camMode]; }
-  toggleBeams() { this.showBeams = !this.showBeams; this.beamLines.visible = this.nodePoints.visible = this.showBeams; this.player.mesh.material.forEach(m => { m.transparent = this.showBeams; m.opacity = this.showBeams ? 0.25 : 1; }); }
+  toggleBeams() { this.showBeams = !this.showBeams; this.beamLines.visible = this.showBeams; this.player.setXray(this.showBeams); }
   cycleSlow() { const s = [1, 0.5, 0.25, 0.1]; this.timeScale = s[(s.indexOf(this.timeScale) + 1) % s.length]; $('slowTxt').textContent = this.timeScale === 1 ? '' : `${this.timeScale}x`; }
   togglePause() { this.paused = !this.paused; $('pauseTxt').style.display = this.paused ? 'block' : 'none'; }
 
@@ -276,7 +341,7 @@ class Game {
     const cam = this.camera;
     if (this.camMode === 2) {
       // hood / driver view rigidly attached to the chassis
-      const p = c.clone().addScaledVector(up, 1.05).addScaledVector(fwd, 0.1).addScaledVector(new THREE.Vector3(...f.r), -0.35);
+      const p = c.clone().addScaledVector(up, 1.05).addScaledVector(fwd, 0.1).addScaledVector(new THREE.Vector3(...f.r), 0.37);
       cam.position.copy(p);
       cam.up.copy(up);
       cam.lookAt(p.clone().add(fwd));
@@ -353,7 +418,10 @@ class Game {
 
     for (const o of this.vehicles) o.updateVisual();
     for (const c of this.crates) c.updateVisual();
-    if (this.showBeams) this.updateBeamView();
+    const showNodes = this.showBeams || this.grabActive();
+    this.nodePoints.visible = showNodes;
+    if (this.showBeams || showNodes) this.updateBeamView();
+    this.updateGrabTarget();
     this.updateCamera(dt);
     const c = v.center();
     this.sun.position.set(c.x + 60, c.y + 120, c.z + 40);
@@ -383,6 +451,14 @@ class Game {
     const W = this.phys;
     let broken = 0;
     for (let i = v.body.beamStart; i < v.body.beamEnd; i++) broken += W.broken[i];
+    const info = v.partsInfo();
+    const chips = info.parts.map(p => `<span class="chip ${p.state}">${p.label}</span>`).join('')
+      + (info.wheelsOff ? `<span class="chip off">${info.wheelsOff} wheel${info.wheelsOff > 1 ? 's' : ''} off</span>` : '')
+      + (info.lights ? `<span class="chip loose">${info.lights} light${info.lights > 1 ? 's' : ''} broken</span>` : '')
+      + (info.glass ? `<span class="chip loose">${info.glass} window${info.glass > 1 ? 's' : ''} smashed</span>` : '');
+    const eng = Math.round(info.engine * 100);
+    const html = `<div class="lbl"><span>Engine</span><span class="${eng < 12 ? 'bad' : eng < 70 ? 'warn' : ''}">${eng < 12 ? 'dead' : eng + '%'}</span></div><div class="chips">${chips}</div>`;
+    if (html !== this._partsHtml) { $('parts').innerHTML = html; this._partsHtml = html; }
     $('stats').textContent = `${Math.round(this._fps)} fps · physics ${this._pm.toFixed(1)} ms · ${PHYS_HZ} Hz · ${W.nodeCount} nodes · ${W.beamCount} beams · ${broken} broken`;
   }
 }

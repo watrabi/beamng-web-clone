@@ -45,6 +45,7 @@ export class SoftBodyWorld {
     this.d = new Float64Array(maxBeams);
     this.yieldF = new Float64Array(maxBeams);
     this.breakStrain = new Float32Array(maxBeams);
+    this.breakF = new Float32Array(maxBeams);   // snaps when pulled harder than this (hinges, latches)
     this.broken = new Uint8Array(maxBeams);
     this.btype = new Uint8Array(maxBeams);
     this.hydroIn = new Float32Array(maxBeams);  // hydro factor
@@ -101,6 +102,7 @@ export class SoftBodyWorld {
     this.d[i] = opts.d ?? 120;
     this.yieldF[i] = opts.yieldF ?? Infinity;
     this.breakStrain[i] = opts.breakStrain ?? Infinity;
+    this.breakF[i] = opts.breakF ?? Infinity;
     this.broken[i] = 0;
     this.btype[i] = opts.type ?? BEAM_NORMAL;
     this.hydroIn[i] = opts.hydroFactor ?? 0;
@@ -228,7 +230,7 @@ export class SoftBodyWorld {
     }
 
     // ---- beams ----
-    const { ba, bb, rest, rest0, k, d, yieldF, breakStrain, broken, btype, stress, hydroIn, hydroRef, limit } = this;
+    const { ba, bb, rest, rest0, k, d, yieldF, breakStrain, breakF, broken, btype, stress, hydroIn, hydroRef, limit } = this;
     const hin = this.hydroInputs;
     const dE = this.deformEnergy;
     for (let i = b0; i < b1; i++) {
@@ -249,6 +251,7 @@ export class SoftBodyWorld {
         if (F > 0) F = 0;
       } else {
         let Fs = k[i] * ext;
+        if (Fs > breakF[i]) { broken[i] = 1; stress[i] = 0; continue; }
         const y = yieldF[i];
         if (Fs > y || Fs < -y) {
           // plastic flow: move rest length so the spring sits at the yield force

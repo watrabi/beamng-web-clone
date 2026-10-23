@@ -85,4 +85,24 @@ export class Audio {
     og.gain.setValueAtTime(0.25 * s, t); og.gain.exponentialRampToValueAtTime(0.001, t + 0.3);
     o.connect(og); og.connect(this.master); o.start(t); o.stop(t + 0.35);
   }
+
+  glass() {
+    if (!this.ctx || !this.enabled) return;
+    const t = this.ctx.currentTime;
+    if (t - (this.lastGlass || 0) < 0.05) return;
+    this.lastGlass = t;
+    const src = this.ctx.createBufferSource(); src.buffer = this.noiseBuf;
+    const f = this.ctx.createBiquadFilter(); f.type = 'highpass'; f.frequency.value = 3000;
+    const g = this.ctx.createGain();
+    g.gain.setValueAtTime(0.5, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.35);
+    src.connect(f); f.connect(g); g.connect(this.master);
+    src.start(t, Math.random()); src.stop(t + 0.4);
+    // little tinkles
+    for (let i = 0; i < 6; i++) {
+      const o = this.ctx.createOscillator(); o.type = 'sine'; o.frequency.value = 2500 + Math.random() * 4000;
+      const og = this.ctx.createGain(); const st = t + Math.random() * 0.25;
+      og.gain.setValueAtTime(0.0001, t); og.gain.setValueAtTime(0.08, st); og.gain.exponentialRampToValueAtTime(0.0001, st + 0.08);
+      o.connect(og); og.connect(this.master); o.start(t); o.stop(st + 0.1);
+    }
+  }
 }

@@ -11,7 +11,7 @@
   html, body { margin: 0; height: 100%; overflow: hidden; background: #0d1014; color: var(--fg); font: 13px/1.35 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; -webkit-user-select: none; user-select: none; touch-action: none; }
   canvas { display: block; position: fixed; inset: 0; width: 100%; height: 100%; }
   .hud { position: fixed; pointer-events: none; }
-  #dash { right: calc(16px + env(safe-area-inset-right, 0px)); bottom: calc(16px + env(safe-area-inset-bottom, 0px)); width: 210px; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; backdrop-filter: blur(6px); }
+  #dash { right: calc(16px + env(safe-area-inset-right, 0px)); bottom: calc(16px + env(safe-area-inset-bottom, 0px)); width: 236px; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; backdrop-filter: blur(6px); }
   #dash .row { display: flex; align-items: baseline; justify-content: space-between; }
   #speed { font-size: 44px; font-weight: 700; font-variant-numeric: tabular-nums; letter-spacing: -1px; }
   #gear { font-size: 30px; font-weight: 700; color: var(--accent); width: 34px; text-align: center; }
@@ -19,6 +19,14 @@
   .bar { height: 6px; background: rgba(255,255,255,0.1); border-radius: 3px; overflow: hidden; margin-top: 6px; }
   .bar > div { height: 100%; width: 0; background: #4fc3f7; transition: width 0.08s linear; }
   #rpmbar.red { background: #ff3b30; }
+  #parts .chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+  .chip { font-size: 10px; padding: 2px 6px; border-radius: 9px; background: rgba(80,200,120,0.18); color: #9fe0b4; }
+  .chip.loose { background: rgba(255,190,40,0.2); color: #ffd36b; }
+  .chip.off { background: rgba(255,70,50,0.22); color: #ff8a7a; text-decoration: line-through; }
+  #parts .warn { color: #ffd36b; } #parts .bad { color: #ff6b5b; font-weight: 700; }
+  body.touch #parts .chips { display: none; }
+  #bGrab { display: none; } body.touch #bGrab { display: inline-block; }
+  #bGrab.on { background: rgba(255,122,26,0.6); }
   #dmgbar { background: linear-gradient(90deg, #ffcc00, #ff3b30); }
   .lbl { display: flex; justify-content: space-between; color: var(--dim); font-size: 11px; margin-top: 8px; font-variant-numeric: tabular-nums; }
   #stats { left: 16px; bottom: 12px; color: var(--dim); font-size: 11px; text-shadow: 0 1px 2px #000; }
@@ -74,6 +82,7 @@
   <button data-act="cam" title="C">🎥 <span id="camName">Chase</span></button>
   <button data-act="beams" title="B">Beams</button>
   <button data-act="slow" title="T">Slow‑mo</button>
+  <button data-act="grab" id="bGrab">✋ Grab</button>
   <span id="slowTxt"></span>
 </div>
 
@@ -98,6 +107,7 @@
   <div><b>R</b> repair here · <b>Shift+R</b> spawn</div>
   <div><b>C</b> camera · drag to look</div>
   <div><b>B</b> show nodes &amp; beams</div>
+  <div><b>Ctrl+drag</b> grab a node &amp; pull</div>
   <div><b>T</b> slow motion · <b>P</b> pause</div>
   <div><b>Y</b> traction control · <b>M</b> mute</div>
   <div><b>1 2 3</b> vehicle · <b>N</b> reset world</div>
@@ -110,6 +120,7 @@
   <div class="bar"><div id="rpmbar"></div></div>
   <div class="lbl"><span>Damage</span><span id="dmg">0%</span></div>
   <div class="bar"><div id="dmgbar"></div></div>
+  <div id="parts"></div>
 </div>
 <div id="stats" class="hud"></div>
 <div id="pauseTxt" class="hud">PAUSED</div>
