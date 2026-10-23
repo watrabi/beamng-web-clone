@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>SoftBody Drive</title>
+<meta name="description" content="A soft-body driving sandbox in the browser: node/beam physics at 2000 Hz, deformable cars, ramps and crash tests.">
+<style>
+  :root { --fg: #f2f4f7; --dim: #9aa4b2; --panel: rgba(14, 17, 22, 0.78); --accent: #ff7a1a; --line: rgba(255,255,255,0.12); }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #0d1014; color: var(--fg); font: 13px/1.35 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; -webkit-user-select: none; user-select: none; touch-action: none; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+  .hud { position: fixed; pointer-events: none; }
+  #dash { right: 16px; bottom: 16px; width: 210px; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; backdrop-filter: blur(6px); }
+  #dash .row { display: flex; align-items: baseline; justify-content: space-between; }
+  #speed { font-size: 44px; font-weight: 700; font-variant-numeric: tabular-nums; letter-spacing: -1px; }
+  #gear { font-size: 30px; font-weight: 700; color: var(--accent); width: 34px; text-align: center; }
+  .unit { color: var(--dim); font-size: 12px; margin-left: 4px; }
+  .bar { height: 6px; background: rgba(255,255,255,0.1); border-radius: 3px; overflow: hidden; margin-top: 6px; }
+  .bar > div { height: 100%; width: 0; background: #4fc3f7; transition: width 0.08s linear; }
+  #rpmbar.red { background: #ff3b30; }
+  #dmgbar { background: linear-gradient(90deg, #ffcc00, #ff3b30); }
+  .lbl { display: flex; justify-content: space-between; color: var(--dim); font-size: 11px; margin-top: 8px; font-variant-numeric: tabular-nums; }
+  #stats { left: 16px; bottom: 12px; color: var(--dim); font-size: 11px; text-shadow: 0 1px 2px #000; }
+  #top { left: 16px; top: 12px; right: 16px; display: flex; gap: 8px; align-items: center; pointer-events: none; flex-wrap: wrap; }
+  #top button, #panel button, #panel select { pointer-events: auto; }
+  button { font: inherit; color: var(--fg); background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 7px 11px; cursor: pointer; backdrop-filter: blur(6px); }
+  button:hover { border-color: rgba(255,255,255,0.3); }
+  button.off { opacity: 0.5; text-decoration: line-through; }
+  .brand { font-weight: 800; letter-spacing: 0.5px; margin-right: 6px; text-shadow: 0 1px 3px #000; }
+  .brand span { color: var(--accent); }
+  #slowTxt { color: var(--accent); font-weight: 700; text-shadow: 0 1px 3px #000; }
+  #panel { position: fixed; top: 56px; left: 16px; width: 260px; max-width: calc(100vw - 32px); background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px; display: none; backdrop-filter: blur(8px); }
+  #panel.open { display: block; }
+  #panel h3 { margin: 4px 0 8px; font-size: 12px; color: var(--dim); text-transform: uppercase; letter-spacing: 1px; }
+  #panel select { width: 100%; font: inherit; color: var(--fg); background: #1b2028; border: 1px solid var(--line); border-radius: 8px; padding: 7px; margin-bottom: 10px; }
+  #colors { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+  #colors button { width: 26px; height: 26px; padding: 0; border-radius: 50%; border: 2px solid rgba(255,255,255,0.25); }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+  #help { left: 16px; top: 56px; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; color: var(--dim); font-size: 12px; line-height: 1.6; }
+  #help b { color: var(--fg); display: inline-block; min-width: 64px; }
+  #help.hide, body.touch #help { display: none; }
+  #panel.open ~ #help { display: none; }
+  #pauseTxt { left: 50%; top: 40%; transform: translate(-50%, -50%); font-size: 28px; font-weight: 800; display: none; text-shadow: 0 2px 8px #000; }
+  #loading { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; background: radial-gradient(circle at 50% 40%, #1f2630, #0b0d11); z-index: 10; }
+  #loading h1 { margin: 0; font-size: 34px; letter-spacing: 1px; } #loading h1 span { color: var(--accent); }
+  #loading .bar { width: 240px; }
+  #loading p { color: var(--dim); margin: 0; max-width: 340px; text-align: center; padding: 0 16px; }
+  #loading.ready #loadtxt { color: var(--fg); font-weight: 700; animation: pulse 1.2s infinite; }
+  @keyframes pulse { 50% { opacity: 0.5; } }
+  /* touch controls */
+  .touchctl { display: none; position: fixed; bottom: 18px; gap: 10px; }
+  body.touch .touchctl { display: flex; }
+  .touchctl div { width: 70px; height: 70px; border-radius: 50%; background: rgba(20,24,30,0.55); border: 2px solid rgba(255,255,255,0.25); display: flex; align-items: center; justify-content: center; font-weight: 800; font-size: 20px; backdrop-filter: blur(4px); }
+  .touchctl div.on { background: rgba(255,122,26,0.55); }
+  #tl { left: 16px; } #tr { right: 16px; }
+  #tHb { position: absolute; right: 0; bottom: 82px; width: 70px !important; height: 40px !important; border-radius: 20px !important; font-size: 14px !important; }
+  body.touch #dash { bottom: auto; top: 60px; right: 16px; width: 150px; padding: 8px 10px; }
+  body.touch #speed { font-size: 32px; }
+  body.touch #stats { display: none; }
+  @media (max-width: 600px) { .brand { display: none; } #top button { padding: 6px 8px; font-size: 12px; } }
+</style>
+<script type="importmap">
+{ "imports": { "three": "./vendor/three/three.module.min.js", "three/addons/": "./vendor/three/addons/" } }
+</script>
+</head>
+<body>
+<canvas id="c"></canvas>
+
+<div id="top" class="hud">
+  <div class="brand">SOFTBODY<span>DRIVE</span></div>
+  <button data-act="menu">☰ Menu</button>
+  <button data-act="reset" title="R">⟲ Reset</button>
+  <button data-act="cam" title="C">🎥 <span id="camName">Chase</span></button>
+  <button data-act="beams" title="B">Beams</button>
+  <button data-act="slow" title="T">Slow‑mo</button>
+  <span id="slowTxt"></span>
+</div>
+
+<div id="panel">
+  <h3>Vehicle</h3>
+  <select id="vehSel"></select>
+  <h3>Paint</h3>
+  <div id="colors"></div>
+  <div class="grid">
+    <button data-act="spawn">Back to spawn</button>
+    <button data-act="all">Reset world</button>
+    <button data-act="pause">Pause</button>
+    <button data-act="sound" id="bSound">Sound</button>
+    <button data-act="tcs" id="bTcs">Traction ctrl</button>
+  </div>
+</div>
+
+<div id="help" class="hud">
+  <div><b>W A S D</b> drive / steer (arrows too)</div>
+  <div><b>Space</b> handbrake</div>
+  <div><b>S</b> at a stop: reverse</div>
+  <div><b>R</b> repair here · <b>Shift+R</b> spawn</div>
+  <div><b>C</b> camera · drag to look</div>
+  <div><b>B</b> show nodes &amp; beams</div>
+  <div><b>T</b> slow motion · <b>P</b> pause</div>
+  <div><b>Y</b> traction control · <b>M</b> mute</div>
+  <div><b>1 2 3</b> vehicle · <b>N</b> reset world</div>
+  <div><b>H</b> hide this · gamepad works</div>
+</div>
+
+<div id="dash" class="hud">
+  <div class="row"><div><span id="speed">0</span><span class="unit">km/h</span></div><div id="gear">N</div></div>
+  <div class="lbl"><span>RPM</span><span id="rpm">0</span></div>
+  <div class="bar"><div id="rpmbar"></div></div>
+  <div class="lbl"><span>Damage</span><span id="dmg">0%</span></div>
+  <div class="bar"><div id="dmgbar"></div></div>
+</div>
+<div id="stats" class="hud"></div>
+<div id="pauseTxt" class="hud">PAUSED</div>
+
+<div id="tl" class="touchctl"><div id="tLeft">◀</div><div id="tRight">▶</div></div>
+<div id="tr" class="touchctl"><div id="tHb">HB</div><div id="tBrake">▼</div><div id="tGas">▲</div></div>
+
+<div id="loading">
+  <h1>SOFTBODY<span>DRIVE</span></h1>
+  <div class="bar"><div id="loadbar"></div></div>
+  <p id="loadtxt">Loading textures…</p>
+  <p>Node &amp; beam soft-body physics at 2000 Hz. Textures &amp; sky: Poly Haven (CC0).</p>
+</div>
+
+<script type="module" src="src/main.js"></script>
+</body>
+</html>
