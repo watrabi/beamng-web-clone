@@ -104,7 +104,7 @@ export class FlexMesh {
     return D;
   }
 
-  update() {
+  update(normals = true) {
     const W = this.world, D = this.updateFrame();
     const px = W.px, py = W.py, pz = W.pz;
     const pos = this.mesh.geometry.attributes.position.array;
@@ -124,6 +124,6 @@ export class FlexMesh {
     }
     const g = this.mesh.geometry;
     g.attributes.position.needsUpdate = true;
-    g.computeVertexNormals();
+    if (normals) g.computeVertexNormals();
   }
 }

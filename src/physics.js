@@ -205,7 +205,7 @@ export class SoftBodyWorld {
     for (let bi = 0; bi < B.length; bi++) {
       const b = B[bi];
       if (b.sleeping || !b.selfCollide) continue;
-      if (--b.selfTimer <= 0) { this._buildSelfPairs(b); b.selfTimer = 12; }
+      if (--b.selfTimer <= 0) { this._buildSelfPairs(b); b.selfTimer = 20; }
       this._collideSelf(b, dt);
     }
 
