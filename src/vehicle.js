@@ -646,6 +646,7 @@ export class Vehicle {
     const plate = plateTexture(String.fromCharCode(65 + (Math.random() * 26 | 0), 65 + (Math.random() * 26 | 0), 65 + (Math.random() * 26 | 0)) + ' ' + (100 + (Math.random() * 900 | 0)));
     const make = (key) => {
       const S = (o) => new THREE.MeshStandardMaterial(o);
+      if (key === 'paint' && this.game.lite) return S({ color: this.color, metalness: 0.55, roughness: 0.3 });
       if (key === 'paint') return new THREE.MeshPhysicalMaterial({ color: this.color, metalness: 0.55, roughness: 0.32, clearcoat: 1, clearcoatRoughness: 0.06 });
       if (key === 'trim') return S({ color: 0x161616, roughness: 0.65 });
       if (key === 'under') return S({ color: 0x0d0d0d, roughness: 0.95 });
@@ -658,6 +659,7 @@ export class Vehicle {
       if (key === 'engine') return S({ color: 0x3c3f45, metalness: 0.6, roughness: 0.45 });
       if (key === 'red') return S({ color: 0xb3201a, roughness: 0.45 });
       if (key === 'inner') return S({ color: 0x141518, roughness: 1, side: THREE.BackSide });
+      if (key.startsWith('glass:') && this.game.lite) return S({ color: 0x0e1820, roughness: 0.05, metalness: 0.3, transparent: true, opacity: 0.42, depthWrite: false });
       if (key.startsWith('glass:')) return new THREE.MeshPhysicalMaterial({ color: 0x0e1820, roughness: 0.03, metalness: 0, transparent: true, opacity: 0.42, envMapIntensity: 1.6, depthWrite: false });
       if (key === 'light:headL' || key === 'light:headR') return S({ color: 0xffffff, emissive: 0xfff2d8, emissiveIntensity: 1.4, roughness: 0.08 });
       if (key === 'light:fog') return S({ color: 0xffffff, emissive: 0xfff6e0, emissiveIntensity: 0.6, roughness: 0.1 });
@@ -839,7 +841,9 @@ export class Vehicle {
     const asleep = this.body.sleeping;
     if (asleep && this._drawnAsleep) return;
     this._drawnAsleep = asleep;
-    for (const fm of this.flex) fm.update();
+    // vertex normals are the costly part: refresh them every other frame on non-player cars in lite mode
+    const nrm = !this.game.lite || this.controlled || (this.game.frameNo & 1) === 0;
+    for (const fm of this.flex) fm.update(nrm);
     const fr = this.computeFrame(false, this._vf || (this._vf = {}));
     const [r0, r1, r2] = fr.r, [u0, u1, u2] = fr.u, [f0, f1, f2] = fr.f;
 

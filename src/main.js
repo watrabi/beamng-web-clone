@@ -13,20 +13,28 @@ const DT = 1 / PHYS_HZ;
 const $ = (id) => document.getElementById(id);
 
 const isMobile = matchMedia('(pointer: coarse)').matches || /Android|iPhone|iPad/i.test(navigator.userAgent);
+// Chromebooks (and ?lite) get the cheap render path: no MSAA, basic shadows, plain PBR materials
+const lite = /CrOS/.test(navigator.userAgent) || /[?&]lite\b/.test(location.search) || (navigator.hardwareConcurrency || 8) <= 4;
+// physBudget: wall-clock ms per frame the solver may use; beyond it the game runs in slow motion instead of stalling
 const QUALITY = isMobile
-  ? { terrainRes: 241, trees: 350, shadow: 1024, pixelRatio: Math.min(devicePixelRatio, 1.5), maxSubFrac: 1 / 30 }
-  : { terrainRes: 321, trees: 700, shadow: 2048, pixelRatio: Math.min(devicePixelRatio, 2), maxSubFrac: 1 / 30 };
+  ? { terrainRes: 241, trees: 350, shadow: 1024, pixelRatio: Math.min(devicePixelRatio, 1.5), maxSubFrac: 1 / 30, physBudget: 20, lite: true }
+  : lite
+    ? { terrainRes: 241, trees: 350, shadow: 1024, pixelRatio: 1, maxSubFrac: 1 / 30, physBudget: 20, lite: true }
+    : { terrainRes: 321, trees: 700, shadow: 2048, pixelRatio: Math.min(devicePixelRatio, 2), maxSubFrac: 1 / 30, physBudget: 24, lite: false };
 
 class Game {
   constructor() {
     this.canvas = $('c');
-    const r = this.renderer = new THREE.WebGLRenderer({ canvas: this.canvas, antialias: !isMobile, powerPreference: 'high-performance' });
+    const r = this.renderer = new THREE.WebGLRenderer({ canvas: this.canvas, antialias: !QUALITY.lite, powerPreference: 'high-performance' });
     r.setPixelRatio(QUALITY.pixelRatio);
     r.setSize(innerWidth, innerHeight);
     r.toneMapping = THREE.ACESFilmicToneMapping;
     r.toneMappingExposure = 0.9;
     r.shadowMap.enabled = true;
-    r.shadowMap.type = THREE.PCFSoftShadowMap;
+    r.shadowMap.type = QUALITY.lite ? THREE.PCFShadowMap : THREE.PCFSoftShadowMap;
+    this.lite = QUALITY.lite;
+    this.resScale = 1;
+    this.frameNo = 0;
     this.scene = new THREE.Scene();
     this.camera = new THREE.PerspectiveCamera(62, innerWidth / innerHeight, 0.1, 2500);
     this.input = new Input();
@@ -472,7 +480,13 @@ class Game {
       if (steps > maxSteps) { steps = maxSteps; this.acc = 0; } else this.acc -= steps * DT;
       for (const o of this.vehicles) o.preFrame(steps * DT || 1e-4);
       const t0 = performance.now();
-      for (let i = 0; i < steps; i++) W.step(DT);
+      let done = 0;
+      while (done < steps) {
+        W.step(DT); done++;
+        // out of time: drop the backlog (slow motion) rather than spiralling into ever longer frames
+        if ((done & 3) === 0 && done < steps && performance.now() - t0 > QUALITY.physBudget) { this.acc = 0; break; }
+      }
+      steps = done;
       physMs = performance.now() - t0;
       // crash sounds from sudden deformation
       const E = W.deformEnergy[v.body.id];
@@ -496,9 +510,29 @@ class Game {
     this.sun.position.set(c.x + 60, c.y + 120, c.z + 40);
     this.sun.target.position.copy(c);
     this.audio.update(v);
+    this.adaptResolution(dt, physMs);
     this.renderer.render(this.scene, this.camera);
+    this.frameNo++;
     this.updateHUD(dt, physMs, steps);
     this.input.endFrame();
+  }
+
+  // dynamic resolution: when frames are slow but physics isn't the reason, render fewer pixels
+  adaptResolution(dt, physMs) {
+    this._rt = (this._rt || 0) + dt;
+    this._rdt = (this._rdt || 1 / 60) * 0.9 + dt * 0.1;
+    this._rpm = (this._rpm || 0) * 0.9 + physMs * 0.1;
+    if (this._rt < 1) return;
+    this._rt = 0;
+    const gpuBound = this._rpm < this._rdt * 1000 * 0.5;
+    let s = this.resScale;
+    if (this._rdt > 1 / 40 && gpuBound) s = Math.max(0.5, s - 0.125);
+    else if (this._rdt < 1 / 56 && s < 1) s = Math.min(1, s + 0.0625);
+    if (s !== this.resScale) {
+      this.resScale = s;
+      this.renderer.setPixelRatio(QUALITY.pixelRatio * s);
+      this.renderer.setSize(innerWidth, innerHeight);
+    }
   }
 
   updateHUD(dt, physMs, steps) {
@@ -528,7 +562,7 @@ class Game {
     const eng = Math.round(info.engine * 100);
     const html = `<div class="lbl"><span>Engine</span><span class="${eng < 12 ? 'bad' : eng < 70 ? 'warn' : ''}">${eng < 12 ? 'dead' : eng + '%'}</span></div><div class="chips">${chips}</div>`;
     if (html !== this._partsHtml) { $('parts').innerHTML = html; this._partsHtml = html; }
-    $('stats').textContent = `${Math.round(this._fps)} fps · physics ${this._pm.toFixed(1)} ms · ${PHYS_HZ} Hz · ${W.nodeCount} nodes · ${W.beamCount} beams · ${broken} broken`;
+    $('stats').textContent = `${Math.round(this._fps)} fps · physics ${this._pm.toFixed(1)} ms · ${PHYS_HZ} Hz · res ${Math.round(this.resScale * 100)}% · ${W.nodeCount} nodes · ${W.beamCount} beams · ${broken} broken`;
   }
 }
 
