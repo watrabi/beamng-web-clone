@@ -62,6 +62,7 @@ export class SoftBodyWorld {
     this.collider = null;      // static world collider
     this.onSubstep = [];       // per-substep force callbacks (wheels, engine)
     this.time = 0;
+    this.limitK = 40;          // bump-stop stiffness multiplier
     this.deformEnergy = new Float64Array(256); // per body
     this.contactImpulse = new Float64Array(256);
   }
@@ -243,7 +244,7 @@ export class SoftBodyWorld {
 
     // ---- beams ----
     const { ba, bb, rest, rest0, k, d, yieldF, breakStrain, breakF, broken, btype, stress, hydroIn, hydroRef, limit } = this;
-    const hin = this.hydroInputs;
+    const hin = this.hydroInputs, LK = this.limitK;
     const dE = this.deformEnergy;
     for (let i = b0; i < b1; i++) {
       if (broken[i]) continue;
@@ -281,8 +282,8 @@ export class SoftBodyWorld {
         if (lm > 0) {
           // progressive bump stop past +-limit
           const rel = ext / r;
-          if (rel > lm) F += k[i] * 40 * (ext - lm * r);
-          else if (rel < -lm) F += k[i] * 40 * (ext + lm * r);
+          if (rel > lm) F += k[i] * LK * (ext - lm * r);
+          else if (rel < -lm) F += k[i] * LK * (ext + lm * r);
         }
       }
       stress[i] = F;

@@ -8,14 +8,15 @@ import { Crate } from './props.js';
 import { Input } from './input.js';
 import { Audio } from './audio.js';
 
-const PHYS_HZ = 2000;
-const DT = 1 / PHYS_HZ;
 const $ = (id) => document.getElementById(id);
 
 const isMobile = matchMedia('(pointer: coarse)').matches || /Android|iPhone|iPad/i.test(navigator.userAgent);
 // Chromebooks (and ?lite) get the cheap render path: no MSAA, basic shadows, plain PBR materials
 const lite = /CrOS/.test(navigator.userAgent) || /[?&]lite\b/.test(location.search) || (navigator.hardwareConcurrency || 8) <= 4;
 // physBudget: wall-clock ms per frame the solver may use; beyond it the game runs in slow motion instead of stalling
+// the beam solver is stable down to ~1200 Hz (1000 Hz starts to ring), so weak devices take the 40% cut
+const PHYS_HZ = (isMobile || lite) ? 1200 : 2000;
+const DT = 1 / PHYS_HZ;
 const QUALITY = isMobile
   ? { terrainRes: 241, trees: 350, shadow: 1024, pixelRatio: Math.min(devicePixelRatio, 1.5), maxSubFrac: 1 / 30, physBudget: 20, lite: true }
   : lite
